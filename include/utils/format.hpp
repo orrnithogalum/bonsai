@@ -32,4 +32,15 @@ public:
     static std::string toReadableShort(uintmax_t bytes) {
         return toReadable(bytes, "");
     }
+
+    static std::string trimSuffix(const std::string& str, size_t max_size, const std::string& suffix) {
+        if (str.size() <= max_size)
+            return str;
+
+        if (suffix.size() >= max_size)
+            return suffix.substr(0, max_size);
+
+        size_t cut = max_size - suffix.size();
+        return str.substr(0, cut) + suffix;
+    }
 };

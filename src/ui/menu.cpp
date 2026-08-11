@@ -2,6 +2,11 @@
 
 #include "../../include/config/config.hpp"
 #include "../../include/utils/format.hpp"
+#include <ftxui/dom/elements.hpp>
+
+#include <ftxui/screen/color.hpp>
+#include <iomanip>
+#include <sstream>
 
 void BonsaiMenu::worker(ScreenInteractive* screen, std::shared_ptr<AppData::BonsaiData> data, Scanner* scanner, const fs::path& default_path) {
     while (true) {
@@ -17,7 +22,7 @@ void BonsaiMenu::worker(ScreenInteractive* screen, std::shared_ptr<AppData::Bons
         // Always allow going back until default_path is reached
         if (!fs::equivalent(current_path, default_path)) {
             new_labels.push_back("..");
-            new_entries.push_back(AppData::BonsaiMenuEntry{0, "..", "", true});
+            new_entries.push_back(AppData::BonsaiMenuEntry{0, 0, "..", "", true});
         }
 
         try {
@@ -33,9 +38,13 @@ void BonsaiMenu::worker(ScreenInteractive* screen, std::shared_ptr<AppData::Bons
                 if (!item.is_dir) {
                     std::error_code ec;
                     item.size = entry.file_size(ec);
-                    if (ec) item.size = 0;
+
+                    if (ec) {
+                        item.size = 0;
+                    }
                 } else {
                     item.size = scanner->get(entry.path());
+                    item.snapped_size = scanner->getSnapped(entry.path());
                 }
 
                 unsorted_entries.push_back(std::move(item));
@@ -118,10 +127,39 @@ Component BonsaiMenu::menu(ScreenInteractive* screen, std::shared_ptr<AppData::B
                                    : (item.is_dir ? config.SIDEBAR_FOLDER_ICON          : config.SIDEBAR_FILE_ICON);
         }
 
+        double growth = 0.0;
+        std::string growth_str;
+
+        if (item.is_dir && item.snapped_size != 0) {
+            growth =
+                (static_cast<double>(item.size) - static_cast<double>(item.snapped_size))
+                / static_cast<double>(item.snapped_size)
+                * 100.0;
+
+            if (std::abs(growth) > config.SIDEBAR_GROWTH_THRESHOLD_PERCENTAGE) {
+                std::ostringstream ss;
+
+                ss << (growth > 0 ? " " : " ")
+                   << std::fixed
+                   << std::setprecision(1)
+                   << std::abs(growth)
+                   << '%';
+
+                growth_str = ss.str();
+            }
+        }
+
         auto row = hbox({
-            text(" " + icon_str + " " + item.label) | size(WIDTH, LESS_THAN, Config::get().SIDEBAR_WIDTH - 15),
+            text(" " + icon_str + " " + FormatUtils::trimSuffix(item.label, Config::get().SIDEBAR_WIDTH * 0.4, "...")) | size(WIDTH, EQUAL, Config::get().SIDEBAR_WIDTH * 0.6),
             filler(),
-            text(item.label == ".." ? "" : FormatUtils::toReadableShort(item.size)) | color(Color::GrayDark)
+
+            text(item.label == ".." ? "" : growth_str) | color(growth > 0 ? Config::get().growthColor() : Config::get().shrinkColor()) | size(WIDTH, EQUAL, Config::get().SIDEBAR_WIDTH * 0.2),
+            filler(),
+
+            hbox(
+                filler(),
+                text(item.label == ".." ? "" : FormatUtils::toReadableShort(item.size)) | color(Color::GrayDark)
+            ) | size(WIDTH, EQUAL, Config::get().SIDEBAR_WIDTH * 0.2)
         });
 
         return is_selected ? row | bgcolor(Color::White) | color(Color::Black)
@@ -136,7 +174,7 @@ Component BonsaiMenu::menu(ScreenInteractive* screen, std::shared_ptr<AppData::B
             if (*selected < 0 || *selected >= (int)data->menu_entries->size() || !(*data->menu_entries)[*selected].is_dir) {
                 return;
             };
-            
+
             new_path = (*data->menu_entries)[*selected].path;
 
             // For ".." go up
@@ -178,7 +216,7 @@ Component BonsaiMenu::menu(ScreenInteractive* screen, std::shared_ptr<AppData::B
         }
 
         data->cv.notify_all();
-    };    
+    };
 
     // Menu is updated as labels update
     return Menu(data->menu_labels.get(), selected, options);

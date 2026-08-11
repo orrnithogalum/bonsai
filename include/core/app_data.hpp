@@ -23,9 +23,10 @@ public:
     */
     struct BonsaiMenuEntry {
         std::uintmax_t size;
+        std::uintmax_t snapped_size;
         std::string label;
         std::string path;
-        
+
         bool is_dir;
     };
 

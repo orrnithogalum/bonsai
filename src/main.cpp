@@ -6,13 +6,16 @@
 #include "../include/ui/piechart.hpp"
 #include "../include/ui/menu.hpp"
 
+#include <cstdio>
 #include <ftxui/component/screen_interactive.hpp>
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/event.hpp>
 #include <filesystem>
 
 #include <iostream>
+#include <unistd.h>
 #include <thread>
+#include <pwd.h>
 
 /* TODO: bug? (can't reproduce anymore...)
 -> scanner isn't finished.
@@ -44,14 +47,19 @@ int main(int argc, char* argv[]) {
     }
 
     // Launch scanner
-    Scanner scanner = Scanner(default_path);
-    std::thread scanner_thread([&scanner]() { scanner.scan(); });
+    auto home = fs::path(getpwuid(getuid())->pw_dir);
+    auto db_path = fs::weakly_canonical(home / ".cache/bonsai/db.txt");
 
+    Scanner scanner = Scanner(default_path, db_path);
+    std::thread scanner_thread([&scanner]() {
+        scanner.scan();
+        scanner.snapshot();
+    });
 
     // Init shared menu & pie data
     int selected = 0;
     auto data = std::make_shared<AppData::BonsaiData>();
-    
+
     data->menu_entries = std::make_shared<std::vector<AppData::BonsaiMenuEntry>>();
     data->menu_labels = std::make_shared<std::vector<std::string>>();
 
@@ -65,7 +73,7 @@ int main(int argc, char* argv[]) {
     bool show_confirm_modal = false;
     bool show_error_modal = false;
     Scanner::ScannerRemoveResult result = Scanner::ScannerRemoveResult{"", false};
-    
+
     auto confirm_modal = BonsaiModalConfirm::confirm(
         [data, &scanner, &result, &show_confirm_modal, &show_error_modal](){
             fs::path selected_path;
@@ -91,9 +99,9 @@ int main(int argc, char* argv[]) {
             }
 
             data->cv.notify_all();
-        }, 
-        [&]{ 
-            show_confirm_modal = false; 
+        },
+        [&]{
+            show_confirm_modal = false;
         }
     );
 
@@ -143,10 +151,10 @@ int main(int argc, char* argv[]) {
                 if(fs::equivalent(*data->path, default_path)) {
                     return true;
                 }
-                
+
                 std::filesystem::path p(*data->path);
                 new_path = p.parent_path().string();
-                
+
                 *data->path = new_path;
             }
 
@@ -163,11 +171,11 @@ int main(int argc, char* argv[]) {
 
         return false;
     });
-    
+
     auto menu_container = Container::Vertical({menu_component});
     std::thread menu_thread(BonsaiMenu::worker, &screen, data, &scanner, default_path);
 
-    
+
     /* Init pie:
     - No need for a containter this time, as the component isn't interactive
     */

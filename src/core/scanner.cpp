@@ -4,12 +4,13 @@
 #include <linux/magic.h>
 #include <sys/statfs.h>
 #include <sys/stat.h>
+#include <fstream>
 
 bool Scanner::isVirtualFs(const fs::path& path) {
     std::string strPath = path.string();
-    
+
     if(
-        strPath.find("/proc") == 0 || 
+        strPath.find("/proc") == 0 ||
         strPath.find("/sys")  == 0
         // strPath.find("/dev")  == 0
         // strPath.find("/run")  == 0
@@ -31,6 +32,29 @@ bool Scanner::isVirtualFs(const fs::path& path) {
     }
 
     return false;
+}
+
+void Scanner::loadSnapshot() {
+    std::ifstream in(this->db_path);
+
+    if (!in.is_open()) return;
+
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.empty()) continue;
+
+        auto tabPos = line.rfind('\t');
+        if (tabPos == std::string::npos) continue;
+
+        std::string path = line.substr(0, tabPos);
+        std::string sizeStr = line.substr(tabPos + 1);
+        try {
+            uint64_t size = std::stoull(sizeStr);
+            dir_sizes[path].second = size;
+        } catch (const std::exception&) {
+            continue;
+        }
+    }
 }
 
 uint64_t Scanner::computeDirSizes(const fs::path& dir) {
@@ -70,7 +94,8 @@ uint64_t Scanner::computeDirSizes(const fs::path& dir) {
 
             {
                 std::unique_lock lock(map_mutex);
-                dir_sizes[dir.string()] = total_size;
+                dir_sizes[dir.string()].first = total_size;
+                dir_sizes[dir.string()].second = 0;
             }
         } catch (const fs::filesystem_error&) {}
     }
@@ -78,12 +103,38 @@ uint64_t Scanner::computeDirSizes(const fs::path& dir) {
     return total_size;
 }
 
+void Scanner::snapshot() {
+    std::lock_guard<std::mutex> lock(map_mutex);
+
+    std::error_code ec;
+    if (this->db_path.has_parent_path()) {
+        fs::create_directories(this->db_path.parent_path(), ec);
+    }
+
+    std::ofstream out(this->db_path, std::ios::trunc);
+    if (!out.is_open()) return;
+
+    for (const auto& [path, size] : dir_sizes) {
+        out << path << '\t' << size.first << '\n';
+    }
+}
+
 uint64_t Scanner::get(const fs::path& path) {
     std::lock_guard<std::mutex> lock(map_mutex);
     auto it = dir_sizes.find(path.string());
-    
+
     if (it != dir_sizes.end())
-        return it->second;
+        return it->second.first;
+
+    return 0;
+}
+
+uint64_t Scanner::getSnapped(const fs::path& path) {
+    std::lock_guard<std::mutex> lock(map_mutex);
+    auto it = dir_sizes.find(path.string());
+
+    if (it != dir_sizes.end())
+        return it->second.second;
 
     return 0;
 }
@@ -91,7 +142,7 @@ uint64_t Scanner::get(const fs::path& path) {
 Scanner::ScannerRemoveResult Scanner::remove(const fs::path& path) {
     {
         std::lock_guard<std::mutex> lock(stop_mutex);
-        
+
         if (!this->done) {
             return ScannerRemoveResult{"Scanner hasn't completed yet.", true};
         }
@@ -104,7 +155,7 @@ Scanner::ScannerRemoveResult Scanner::remove(const fs::path& path) {
     if(fs::is_directory(path)) {
         {
             std::lock_guard<std::mutex> lock(map_mutex);
-            removed_size = dir_sizes[path.string()];
+            removed_size = dir_sizes[path.string()].first;
         }
     } else {
         std::error_code ec;
@@ -130,11 +181,11 @@ Scanner::ScannerRemoveResult Scanner::remove(const fs::path& path) {
         fs::path current = path.parent_path();
 
         while (!current.empty()) {
-            dir_sizes[current.string()] -= removed_size;
+            dir_sizes[current.string()].first -= removed_size;
 
-            if (dir_sizes[current.string()] < 0) {
-                dir_sizes[current.string()] = 0;
-            } 
+            if (dir_sizes[current.string()].first < 0) {
+                dir_sizes[current.string()].first = 0;
+            }
 
             if (fs::equivalent(this->path, current)) {
                 break;
@@ -151,6 +202,8 @@ Scanner::ScannerRemoveResult Scanner::remove(const fs::path& path) {
 
 void Scanner::scan() {
     computeDirSizes(this->path);
+    loadSnapshot();
+
     {
         std::lock_guard lock(stop_mutex);
         this->done = true;

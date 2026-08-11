@@ -28,19 +28,31 @@ public:
         bool failed;
     };
 
-    Scanner(const fs::path& _path) : path(_path) {};
+    struct SnapshotDiff {
+        uint64_t old_size;
+        uint64_t new_size;
+        double percent_change; // (new-old)/old * 100, 0 if old==0 and new==0
+    };
+
+    Scanner(const fs::path& _path, const fs::path& _db_path) : path(_path), db_path(_db_path) {};
 
     void scan();
     void stop();
     bool isDone();
+
+    void snapshot();
+    void loadSnapshot();
+
     ScannerRemoveResult remove(const fs::path& path);
 
     uint64_t get(const fs::path& path);
-    
+    uint64_t getSnapped(const fs::path& path);
+
 private:
     fs::path path;
+    fs::path db_path;
 
-    std::unordered_map<std::string, uint64_t> dir_sizes;
+    std::unordered_map<std::string, std::pair<uint64_t, uint64_t>> dir_sizes;
     std::mutex map_mutex;
 
     std::mutex stop_mutex;
@@ -71,7 +83,7 @@ private:
     };
 
     std::unordered_set<Inode, InodeHash> visited;
-    
+
     bool isVirtualFs(const fs::path& path);
 
     /* computeDirSizes(dir)

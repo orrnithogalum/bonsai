@@ -13,6 +13,8 @@ Explanation:
 
 #include "gen/defaults.hpp"
 
+#include <ftxui/component/component.hpp>
+
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -20,6 +22,8 @@ Explanation:
 #include <optional>
 #include <array>
 #include <vector>
+#include <unistd.h>
+#include <pwd.h>
 #include <string>
 #include <stdexcept>
 
@@ -35,10 +39,14 @@ public:
     std::string SIDEBAR_FILE_ICON;
     std::string SIDEBAR_BACK_ICON;
 
+    std::array<int, 3> SIDEBAR_GROWTH_COLOR = {255, 175, 95};
+    std::array<int, 3> SIDEBAR_SHRINK_COLOR = {95, 125, 255};
+
     int CHART_MAX_GENERATIONS;
     int SIDEBAR_WIDTH;
-    
-    double CHART_MAX_SIZE_THRESHOLD_PERCENTAGE;
+
+    double SIDEBAR_GROWTH_THRESHOLD_PERCENTAGE = 0.2;
+    double CHART_MAX_SIZE_THRESHOLD_PERCENTAGE = 2;
     double CHART_DIM_FACTOR;
 
     /* Lazy initialization using a lambda:
@@ -50,7 +58,7 @@ public:
         static Config instance = []() -> Config {
             if (!ensureConfigFile()) throw std::runtime_error("Cannot create config file");
             std::string path = getUserConfigPath();
-            
+
             auto config = parseConfigFile(path);
             if (!config) throw std::runtime_error("Invalid config file");
             return *config;
@@ -60,67 +68,123 @@ public:
 
     /* Save the config file:
     - If user resizes the sidebar, then it's saved here
-    - That is the only thing that can change programmatically
-    - In case any other variables change programmatically in the future, rewrite everything.
+    - That is the only thing that can change programmatically, for now
     */
     bool writeToFile() const {
         std::string path = getUserConfigPath();
         if (path.empty()) return false;
 
-        fs::path config_dir = fs::path(path).parent_path();
-        if (!fs::exists(config_dir)) {
-            if (!fs::create_directories(config_dir))
-                return false;
+        std::ifstream in(path);
+        if (!in.is_open()) return false;
+
+        std::vector<std::string> lines;
+        std::string line;
+        bool found = false;
+
+        while (std::getline(in, line)) {
+            // Check whether this line defines SIDEBAR_WIDTH.
+            std::string trimmed = line;
+
+            // Trim leading whitespace.
+            size_t first = trimmed.find_first_not_of(" \t");
+            if (first != std::string::npos)
+                trimmed = trimmed.substr(first);
+
+            // Check the key before the '='.
+            size_t eq = trimmed.find('=');
+
+            if (eq != std::string::npos) {
+                std::string key = trimmed.substr(0, eq);
+
+                // Trim trailing whitespace from the key.
+                size_t last = key.find_last_not_of(" \t");
+                if (last != std::string::npos)
+                    key = key.substr(0, last + 1);
+
+                if (key == "SIDEBAR_WIDTH") {
+                    // Preserve indentation and replace only the value.
+                    size_t value_start = line.find('=', eq);
+                    if (value_start != std::string::npos) {
+                        ++value_start;
+
+                        // Preserve any whitespace after '='.
+                        size_t whitespace_end =
+                            line.find_first_not_of(" \t", value_start);
+
+                        std::string prefix =
+                            line.substr(0, whitespace_end == std::string::npos
+                                               ? line.size()
+                                               : whitespace_end);
+
+                        // Preserve an inline comment, if present.
+                        std::string comment;
+                        if (whitespace_end != std::string::npos) {
+                            size_t comment_pos = line.find('#', whitespace_end);
+
+                            if (comment_pos != std::string::npos)
+                                comment = line.substr(comment_pos);
+                        }
+
+                        line = prefix + std::to_string(SIDEBAR_WIDTH);
+
+                        if (!comment.empty())
+                            line += " " + comment;
+
+                        found = true;
+                    }
+                }
+            }
+
+            lines.push_back(line);
         }
+
+        in.close();
+
+        // If SIDEBAR_WIDTH wasn't present, don't modify the file.
+        if (!found)
+            return false;
 
         std::ofstream out(path, std::ios::trunc);
         if (!out.is_open()) return false;
 
-        out << "SIDEBAR_WIDTH=" << SIDEBAR_WIDTH << "\n";
+        for (size_t i = 0; i < lines.size(); ++i) {
+            out << lines[i];
 
-        out << "SIDEBAR_SELECTED_FOLDER_ICON=\""
-            << SIDEBAR_SELECTED_FOLDER_ICON << "\"\n";
-
-        out << "SIDEBAR_SELECTED_FILE_ICON=\""
-            << SIDEBAR_SELECTED_FILE_ICON << "\"\n";
-
-        out << "SIDEBAR_FOLDER_ICON=\""
-            << SIDEBAR_FOLDER_ICON << "\"\n";
-
-        out << "SIDEBAR_FILE_ICON=\""
-            << SIDEBAR_FILE_ICON << "\"\n";
-
-        out << "SIDEBAR_BACK_ICON=\""
-            << SIDEBAR_BACK_ICON << "\"\n";
-
-        out << "CHART_MAX_SIZE_THRESHOLD_PERCENTAGE="
-            << CHART_MAX_SIZE_THRESHOLD_PERCENTAGE << "\n";
-
-        out << "CHART_MAX_GENERATIONS="
-            << CHART_MAX_GENERATIONS << "\n";
-
-        out << "CHART_DIM_FACTOR="
-            << CHART_DIM_FACTOR << "\n\n";
-
-        out << "CHART_COLORS=[\n";
-        for (const auto& color : CHART_COLORS) {
-            out << "    {" 
-                << color[0] << "," 
-                << color[1] << "," 
-                << color[2] << "}\n";
+            if (i + 1 < lines.size())
+                out << '\n';
         }
-        out << "]\n";
 
         return true;
+    }
+
+    static ftxui::Color growthColor() {
+        const auto& config = Config::get();
+
+        return ftxui::Color::RGB(
+            config.SIDEBAR_GROWTH_COLOR[0],
+            config.SIDEBAR_GROWTH_COLOR[1],
+            config.SIDEBAR_GROWTH_COLOR[2]
+        );
+    }
+
+    static ftxui::Color shrinkColor() {
+        const auto& config = Config::get();
+
+        return ftxui::Color::RGB(
+            config.SIDEBAR_SHRINK_COLOR[0],
+            config.SIDEBAR_SHRINK_COLOR[1],
+            config.SIDEBAR_SHRINK_COLOR[2]
+        );
     }
 
 private:
     // Returns path to ~/.config/bonsai/bonsai.conf or empty string if HOME not set
     inline static std::string getUserConfigPath() {
-        const char* home = getenv("HOME");
-        if (!home) { return ""; }
+        if (const auto* pw = getpwuid(getuid()); pw && pw->pw_dir) {
+            return (fs::path(pw->pw_dir) / ".config/bonsai/bonsai.conf").string();
+        }
 
-        return std::string(home) + "/.config/bonsai/bonsai.conf";
+        return ".config/bonsai/bonsai.conf";
     }
 
     // Writes the default configuration binary to the given path
@@ -143,7 +207,7 @@ private:
 
         if (!fs::exists(config_dir)) fs::create_directories(config_dir);
         if (!fs::exists(config_path)) return writeDefaultConfig(config_path);
-        
+
         return true;
     }
 
@@ -160,7 +224,7 @@ private:
 
         Config cfg;
         std::string line;
-        
+
         // Trim leading and trailing whitespace
         auto trim = [](std::string& s) {
             s.erase(0, s.find_first_not_of(" \t"));
@@ -169,55 +233,73 @@ private:
 
         while (std::getline(in, line)) {
             // Skip comments and empty lines
-            if (line.empty() || line[0] == '#') 
+            if (line.empty() || line[0] == '#')
                 continue;
-            
+
             // Skip malformed lines
             size_t eq = line.find('=');
             if (eq == std::string::npos)
                 continue;
-            
+
             std::string key = line.substr(0, eq);
             std::string value = line.substr(eq + 1);
-            
+
             trim(key);
             trim(value);
 
             try {
-                if (key == "SIDEBAR_WIDTH") 
+                if (key == "SIDEBAR_WIDTH")
                     cfg.SIDEBAR_WIDTH = std::stoi(value);
 
                 else if (key == "SIDEBAR_SELECTED_FOLDER_ICON")
                     cfg.SIDEBAR_SELECTED_FOLDER_ICON = value.substr(1, value.size() - 2);
-                
+
                 else if (key == "SIDEBAR_SELECTED_FILE_ICON")
                     cfg.SIDEBAR_SELECTED_FILE_ICON = value.substr(1, value.size() - 2);
-                
+
                 else if (key == "SIDEBAR_FOLDER_ICON")
                     cfg.SIDEBAR_FOLDER_ICON = value.substr(1, value.size() - 2);
-                
+
                 else if (key == "SIDEBAR_FILE_ICON")
                     cfg.SIDEBAR_FILE_ICON = value.substr(1, value.size() - 2);
-                
+
                 else if (key == "SIDEBAR_BACK_ICON")
                     cfg.SIDEBAR_BACK_ICON = value.substr(1, value.size() - 2);
-                
+
+                else if (key == "SIDEBAR_GROWTH_COLOR") {
+                    std::stringstream ss(value);
+                    char c;
+
+                    ss >> c >> cfg.SIDEBAR_GROWTH_COLOR[0]
+                       >> c >> cfg.SIDEBAR_GROWTH_COLOR[1]
+                       >> c >> cfg.SIDEBAR_GROWTH_COLOR[2];
+                }
+
+                else if (key == "SIDEBAR_SHRINK_COLOR") {
+                    std::stringstream ss(value);
+                    char c;
+
+                    ss >> c >> cfg.SIDEBAR_SHRINK_COLOR[0]
+                       >> c >> cfg.SIDEBAR_SHRINK_COLOR[1]
+                       >> c >> cfg.SIDEBAR_SHRINK_COLOR[2];
+                }
+
                 else if (key == "CHART_MAX_SIZE_THRESHOLD_PERCENTAGE")
                     cfg.CHART_MAX_SIZE_THRESHOLD_PERCENTAGE = std::stod(value);
-                
+
                 else if (key == "CHART_MAX_GENERATIONS")
                     cfg.CHART_MAX_GENERATIONS = std::stoi(value);
-                
+
                 else if (key == "CHART_DIM_FACTOR")
                     cfg.CHART_DIM_FACTOR = std::stod(value);
-                
+
                 else if (key == "CHART_COLORS") {
                     std::string colors_block;
-                    
+
                     if (value.find('[') != std::string::npos) {
                         colors_block += value.substr(value.find('[') + 1);
                         std::string line2;
-                        
+
                         while (std::getline(in, line2)) {
                             if (line2.find(']') != std::string::npos) {
                                 colors_block += line2.substr(0, line2.find(']'));
@@ -233,10 +315,10 @@ private:
 
                     while (std::getline(ss, tuple, '}')) {
                         size_t start = tuple.find('{');
-                        
+
                         if (start == std::string::npos)
                             continue;
-                        
+
                         tuple = tuple.substr(start + 1);
                         std::stringstream ts(tuple);
                         std::array<int, 3> color{};
@@ -246,7 +328,7 @@ private:
                             std::getline(ts, num, ',');
                             color[i] = std::stoi(num);
                         }
-                        
+
                         cfg.CHART_COLORS.push_back(color);
                     }
                 }
