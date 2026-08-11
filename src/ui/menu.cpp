@@ -2,11 +2,14 @@
 
 #include "../../include/config/config.hpp"
 #include "../../include/utils/format.hpp"
-#include <ftxui/dom/elements.hpp>
 
+#include <ftxui/dom/elements.hpp>
 #include <ftxui/screen/color.hpp>
+
+#include <algorithm>
 #include <iomanip>
 #include <sstream>
+#include <thread>
 
 void BonsaiMenu::worker(ScreenInteractive* screen, std::shared_ptr<AppData::BonsaiData> data, Scanner* scanner, const fs::path& default_path) {
     while (true) {

@@ -47,7 +47,7 @@ public:
 
     double SIDEBAR_GROWTH_THRESHOLD_PERCENTAGE = 0.2;
     double CHART_MAX_SIZE_THRESHOLD_PERCENTAGE = 2;
-    double CHART_DIM_FACTOR;
+    double CHART_DIM_FACTOR = 0.15;
 
     /* Lazy initialization using a lambda:
     - Ensures config is loaded once at first access

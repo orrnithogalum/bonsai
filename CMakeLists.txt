@@ -9,13 +9,13 @@ include(FetchContent)
 FetchContent_Declare(
   ftxui
   GIT_REPOSITORY https://github.com/ArthurSonzogni/ftxui.git
-  GIT_TAG v6.1.9
+  GIT_TAG v7.0.3
 )
 FetchContent_MakeAvailable(ftxui)
 
 set(SRC
     src/main.cpp
-    
+
     src/core/app_data.cpp
     src/core/scanner.cpp
 
@@ -37,7 +37,7 @@ add_custom_command(
 
     COMMAND xxd -i -n bonsai_default ${DEFAULT_CONF} > ${GENERATED_HEADER}
     COMMAND sed -i -E "s/^(unsigned )/inline \\1/" ${GENERATED_HEADER}
-    
+
     DEPENDS ${DEFAULT_CONF}
     COMMENT "Embedding default config into ${GENERATED_HEADER}"
     VERBATIM

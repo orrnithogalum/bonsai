@@ -197,6 +197,7 @@ Scanner::ScannerRemoveResult Scanner::remove(const fs::path& path) {
         dir_sizes.erase(target);
     }
 
+    this->snapshot();
     return ScannerRemoveResult{"", false};;
 }
 

@@ -4,6 +4,8 @@
 #include "../../include/utils/format.hpp"
 
 #include <filesystem>
+#include <algorithm>
+#include <thread>
 #include <string>
 #include <cmath>
 #include <map>
@@ -59,8 +61,8 @@ void BonsaiPie::drawAngledBlockEllipseRingOffset(Canvas& c, int cx, int cy, int 
             int px = static_cast<int>(cx + dx_outer * t);
             int py = static_cast<int>(cy + dy_outer * t);
 
-            c.DrawBlock(px, py, true, [color](Pixel &p) {
-                p.foreground_color = color;
+            c.DrawBlock(px, py, true, [color](Cell &c) {
+                c.foreground_color = color;
             });
         }
 
@@ -71,9 +73,9 @@ void BonsaiPie::drawAngledBlockEllipseRingOffset(Canvas& c, int cx, int cy, int 
         sin_a = new_sin;
     }
 
-    c.DrawText(text_x, text_y, display_label, [color, text_color](Pixel &p) {
-        p.foreground_color = text_color;
-        p.background_color = color;
+    c.DrawText(text_x, text_y, display_label, [color, text_color](Cell &c) {
+        c.foreground_color = text_color;
+        c.background_color = color;
     });
 }
 
@@ -94,7 +96,7 @@ void BonsaiPie::collectEntries(const fs::path& dir, std::vector<EntryInfo>& entr
                 info.size = scanner->get(entry.path());
                 entries.push_back(info);
                 collectEntries(entry.path(), entries, current_depth + 1, max_depth, scanner);
-            
+
             } else if (entry.is_regular_file()) {
                 info.size = entry.file_size();
                 entries.push_back(info);
@@ -107,13 +109,13 @@ void BonsaiPie::worker(ScreenInteractive* screen, std::shared_ptr<AppData::Bonsa
     std::vector<EntryInfo> entries;
 
     int passes = 0;
-        
+
     while (true) {
 
         fs::path current_path = "";
         bool sel_changed = false;
         int selected = 0;
-        
+
         {
             std::lock_guard<std::mutex> lock(data->menu_mutex);
             sel_changed = data->pie_sel_changed;
@@ -145,7 +147,7 @@ void BonsaiPie::worker(ScreenInteractive* screen, std::shared_ptr<AppData::Bonsa
             - Depth first: lower depth is higer priority
             - Type second: directories have a higher priority over files
             - Size third: larger sizes have a higher priority over lower ones
-            
+
             - Maybe we could use a priority queue here? idk.
             */
             std::sort(entries.begin(), entries.end(), [](const EntryInfo& a, const EntryInfo& b) {
@@ -162,7 +164,7 @@ void BonsaiPie::worker(ScreenInteractive* screen, std::shared_ptr<AppData::Bonsa
         int i = 0;
 
         /* Color & offset tracking:
-        - layer_offsets_per_parent: 
+        - layer_offsets_per_parent:
           Tracks the accumulated sweep (in degrees) already used for a given parent
           at its current depth layer. This determines where the next child slice
           of that parent should start (running angular total per parent).
@@ -176,7 +178,7 @@ void BonsaiPie::worker(ScreenInteractive* screen, std::shared_ptr<AppData::Bonsa
           Stores the computed color and text color for each slice (keyed by full path).
           Allows child entries to derive their color from their parent’s color
           (e.g., darkening via interpolation).
-          
+
         - color_indexes:
           Tracks how many slices have already been processed per depth layer per parent.
           Used to progressively adjust (e.g., darken) sibling slice colors within
@@ -185,7 +187,7 @@ void BonsaiPie::worker(ScreenInteractive* screen, std::shared_ptr<AppData::Bonsa
         std::map<std::string, int> layer_offsets_per_parent;
         std::map<std::string, int> slice_offsets;
 
-        std::map<std::pair<int, std::string>, int> color_indexes_per_parent;        
+        std::map<std::pair<int, std::string>, int> color_indexes_per_parent;
         std::map<std::string, std::pair<Color, Color>> slice_colors;
 
         for(auto& entry : entries) {
@@ -201,7 +203,7 @@ void BonsaiPie::worker(ScreenInteractive* screen, std::shared_ptr<AppData::Bonsa
             - I choose only to keep 2 rings active during scanning
             - Many rings imply an even larger amount of slices
             - This causes a lot of DrawAngledBlockEllipseOffset(...) calls which are performance intensive on ui thread
-            - Ftxui has pixel buffer when rendering so 1rst render takes a long time with 4 rings (lots of pixel updates)
+            - Ftxui has cell buffer when rendering so 1rst render takes a long time with 4 rings (lots of cell updates)
             - 4 ring piechart is completed only on scan completion
             */
             if(entry.depth >= 2 && !scanner->isDone()) {
@@ -223,7 +225,7 @@ void BonsaiPie::worker(ScreenInteractive* screen, std::shared_ptr<AppData::Bonsa
             }
 
             std::array<int, 3UL> color_values = cfg.CHART_COLORS[i % cfg.CHART_COLORS.size()];
-            
+
             Color color = Color::RGB(color_values[0], color_values[1], color_values[2]);
             Color text_color = Color::Default;
 
@@ -241,7 +243,7 @@ void BonsaiPie::worker(ScreenInteractive* screen, std::shared_ptr<AppData::Bonsa
 
             /* In these two code blocks, false is the logic to check wether the slice is selected
             - selected can be -1 because we manually add a back entry for non default_dir paths
-            */ 
+            */
             if(selected != -1 && entry.depth == 0 && selected < entries.size() && entries[selected].depth == 0) {
                 color = fs::equivalent(entry.path, entries[selected].path) ? Color::White : color;
                 text_color = fs::equivalent(entry.path, entries[selected].path) ? Color::Black : text_color;
@@ -262,7 +264,7 @@ void BonsaiPie::worker(ScreenInteractive* screen, std::shared_ptr<AppData::Bonsa
             if(entry.depth == 0) {
                 slice.offset_angle = layer_offsets_per_parent[current_path];
                 layer_offsets_per_parent[current_path] += sweep;
-            
+
             } else {
                 std::string parent = entry.path.parent_path().string();
                 slice.offset_angle = slice_offsets[parent] + layer_offsets_per_parent[parent];
@@ -376,8 +378,8 @@ Component BonsaiPie::pie(std::shared_ptr<AppData::BonsaiData> data, Scanner* sca
 
             // Scanner status
             if(!scanner->isDone()) {
-                c.DrawText(w  - 21, 0, "Scanning...", [](Pixel& p) { p.foreground_color = Color::White; });
-            }           
+                c.DrawText(w  - 21, 0, "Scanning...", [](Cell& c) { c.foreground_color = Color::White; });
+            }
 
         }) | flex;
     });
