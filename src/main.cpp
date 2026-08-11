@@ -6,7 +6,6 @@
 #include "../include/ui/piechart.hpp"
 #include "../include/ui/menu.hpp"
 
-#include <cstdio>
 #include <ftxui/component/screen_interactive.hpp>
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/event.hpp>
