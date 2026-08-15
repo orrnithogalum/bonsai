@@ -49,6 +49,8 @@ public:
     double CHART_MAX_SIZE_THRESHOLD_PERCENTAGE = 2;
     double CHART_DIM_FACTOR = 0.15;
 
+    bool ENABLE_FOLDER_SIZE_PERCENTAGES = true;
+
     /* Lazy initialization using a lambda:
     - Ensures config is loaded once at first access
     - If the config file does not exist, create it with defaults
@@ -72,89 +74,66 @@ public:
     */
     bool writeToFile() const {
         std::string path = getUserConfigPath();
-        if (path.empty()) return false;
-
-        std::ifstream in(path);
-        if (!in.is_open()) return false;
-
-        std::vector<std::string> lines;
-        std::string line;
-        bool found = false;
-
-        while (std::getline(in, line)) {
-            // Check whether this line defines SIDEBAR_WIDTH.
-            std::string trimmed = line;
-
-            // Trim leading whitespace.
-            size_t first = trimmed.find_first_not_of(" \t");
-            if (first != std::string::npos)
-                trimmed = trimmed.substr(first);
-
-            // Check the key before the '='.
-            size_t eq = trimmed.find('=');
-
-            if (eq != std::string::npos) {
-                std::string key = trimmed.substr(0, eq);
-
-                // Trim trailing whitespace from the key.
-                size_t last = key.find_last_not_of(" \t");
-                if (last != std::string::npos)
-                    key = key.substr(0, last + 1);
-
-                if (key == "SIDEBAR_WIDTH") {
-                    // Preserve indentation and replace only the value.
-                    size_t value_start = line.find('=', eq);
-                    if (value_start != std::string::npos) {
-                        ++value_start;
-
-                        // Preserve any whitespace after '='.
-                        size_t whitespace_end =
-                            line.find_first_not_of(" \t", value_start);
-
-                        std::string prefix =
-                            line.substr(0, whitespace_end == std::string::npos
-                                               ? line.size()
-                                               : whitespace_end);
-
-                        // Preserve an inline comment, if present.
-                        std::string comment;
-                        if (whitespace_end != std::string::npos) {
-                            size_t comment_pos = line.find('#', whitespace_end);
-
-                            if (comment_pos != std::string::npos)
-                                comment = line.substr(comment_pos);
-                        }
-
-                        line = prefix + std::to_string(SIDEBAR_WIDTH);
-
-                        if (!comment.empty())
-                            line += " " + comment;
-
-                        found = true;
-                    }
-                }
-            }
-
-            lines.push_back(line);
-        }
-
-        in.close();
-
-        // If SIDEBAR_WIDTH wasn't present, don't modify the file.
-        if (!found)
+        if (path.empty())
             return false;
 
-        std::ofstream out(path, std::ios::trunc);
-        if (!out.is_open()) return false;
+        std::string config(
+            reinterpret_cast<const char*>(bonsai_default),
+            bonsai_default_len
+        );
 
-        for (size_t i = 0; i < lines.size(); ++i) {
-            out << lines[i];
+        size_t pos = config.find("SIDEBAR_WIDTH");
 
-            if (i + 1 < lines.size())
-                out << '\n';
+        if (pos == std::string::npos)
+            return false;
+
+        size_t eq = config.find('=', pos);
+
+        if (eq == std::string::npos)
+            return false;
+
+        size_t value_start = eq + 1;
+
+        while (value_start < config.size() &&
+               (config[value_start] == ' ' ||
+                config[value_start] == '\t')) {
+            ++value_start;
         }
 
-        return true;
+        size_t value_end = value_start;
+
+        while (value_end < config.size() &&
+               config[value_end] != '\n' &&
+               config[value_end] != '\r' &&
+               config[value_end] != '#') {
+            ++value_end;
+        }
+
+        size_t trimmed_end = value_end;
+
+        while (trimmed_end > value_start &&
+               (config[trimmed_end - 1] == ' ' ||
+                config[trimmed_end - 1] == '\t')) {
+            --trimmed_end;
+        }
+
+        config.replace(
+            value_start,
+            trimmed_end - value_start,
+            std::to_string(SIDEBAR_WIDTH)
+        );
+
+        std::ofstream out(path, std::ios::binary | std::ios::trunc);
+
+        if (!out.is_open())
+            return false;
+
+        out.write(
+            config.data(),
+            static_cast<std::streamsize>(config.size())
+        );
+
+        return out.good();
     }
 
     static ftxui::Color growthColor() {
@@ -332,6 +311,11 @@ private:
                         cfg.CHART_COLORS.push_back(color);
                     }
                 }
+
+                else if (key == "ENABLE_FOLDER_SIZE_PERCENTAGES") {
+                    cfg.ENABLE_FOLDER_SIZE_PERCENTAGES = (value == "true");
+                }
+
             } catch (...) {
                 return std::nullopt;
             }

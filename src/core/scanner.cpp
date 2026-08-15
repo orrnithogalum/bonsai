@@ -1,5 +1,7 @@
 #include "../../include/core/scanner.hpp"
 
+#include "../../include/config/config.hpp"
+
 #include <filesystem>
 #include <linux/magic.h>
 #include <sys/statfs.h>
@@ -37,7 +39,8 @@ bool Scanner::isVirtualFs(const fs::path& path) {
 void Scanner::loadSnapshot() {
     std::ifstream in(this->db_path);
 
-    if (!in.is_open()) return;
+    auto config = Config::get();
+    if (!in.is_open() || !config.ENABLE_FOLDER_SIZE_PERCENTAGES) return;
 
     std::string line;
     while (std::getline(in, line)) {
@@ -104,6 +107,9 @@ uint64_t Scanner::computeDirSizes(const fs::path& dir) {
 }
 
 void Scanner::snapshot() {
+    auto config = Config::get();
+    if(!config.ENABLE_FOLDER_SIZE_PERCENTAGES) return;
+
     std::lock_guard<std::mutex> lock(map_mutex);
 
     std::error_code ec;
@@ -130,6 +136,9 @@ uint64_t Scanner::get(const fs::path& path) {
 }
 
 uint64_t Scanner::getSnapped(const fs::path& path) {
+    auto config = Config::get();
+    if(!config.ENABLE_FOLDER_SIZE_PERCENTAGES) return 0;
+
     std::lock_guard<std::mutex> lock(map_mutex);
     auto it = dir_sizes.find(path.string());
 

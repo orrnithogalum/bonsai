@@ -153,7 +153,7 @@ Component BonsaiMenu::menu(ScreenInteractive* screen, std::shared_ptr<AppData::B
         }
 
         auto row = hbox({
-            text(" " + icon_str + " " + FormatUtils::trimSuffix(item.label, Config::get().SIDEBAR_WIDTH * 0.4, "...")) | size(WIDTH, EQUAL, Config::get().SIDEBAR_WIDTH * 0.6),
+            text(" " + icon_str + " " + FormatUtils::trimSuffix(item.label, Config::get().SIDEBAR_WIDTH * 0.4, "...")) | size(WIDTH, EQUAL, Config::get().SIDEBAR_WIDTH * 0.4),
             filler(),
 
             text(item.label == ".." ? "" : growth_str) | color(growth > 0 ? Config::get().growthColor() : Config::get().shrinkColor()) | size(WIDTH, EQUAL, Config::get().SIDEBAR_WIDTH * 0.2),
