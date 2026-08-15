@@ -77,50 +77,181 @@ public:
         if (path.empty())
             return false;
 
+        std::ifstream in(path);
+        if (!in.is_open())
+            return false;
+
+        std::string userConfig(
+            (std::istreambuf_iterator<char>(in)),
+            std::istreambuf_iterator<char>()
+        );
+
+        in.close();
+
         std::string config(
             reinterpret_cast<const char*>(bonsai_default),
             bonsai_default_len
         );
 
-        size_t pos = config.find("SIDEBAR_WIDTH");
+        auto copyValue = [](std::string& config,
+                            const std::string& source,
+                            const std::string& key) -> bool {
+            size_t source_key = source.find(key);
 
-        if (pos == std::string::npos)
-            return false;
+            if (source_key == std::string::npos)
+                return false;
 
-        size_t eq = config.find('=', pos);
+            size_t source_eq = source.find('=', source_key);
 
-        if (eq == std::string::npos)
-            return false;
+            if (source_eq == std::string::npos)
+                return false;
 
-        size_t value_start = eq + 1;
+            size_t source_value_start = source_eq + 1;
 
-        while (value_start < config.size() &&
-               (config[value_start] == ' ' ||
-                config[value_start] == '\t')) {
-            ++value_start;
-        }
+            while (source_value_start < source.size() &&
+                   (source[source_value_start] == ' ' ||
+                    source[source_value_start] == '\t')) {
+                ++source_value_start;
+            }
 
-        size_t value_end = value_start;
+            size_t source_value_end = source_value_start;
 
-        while (value_end < config.size() &&
-               config[value_end] != '\n' &&
-               config[value_end] != '\r' &&
-               config[value_end] != '#') {
-            ++value_end;
-        }
+            while (source_value_end < source.size() &&
+                   source[source_value_end] != '\n' &&
+                   source[source_value_end] != '\r' &&
+                   source[source_value_end] != '#') {
+                ++source_value_end;
+            }
 
-        size_t trimmed_end = value_end;
+            while (source_value_end > source_value_start &&
+                   (source[source_value_end - 1] == ' ' ||
+                    source[source_value_end - 1] == '\t')) {
+                --source_value_end;
+            }
 
-        while (trimmed_end > value_start &&
-               (config[trimmed_end - 1] == ' ' ||
-                config[trimmed_end - 1] == '\t')) {
-            --trimmed_end;
-        }
+            std::string value = source.substr(
+                source_value_start,
+                source_value_end - source_value_start
+            );
 
-        config.replace(
-            value_start,
-            trimmed_end - value_start,
-            std::to_string(SIDEBAR_WIDTH)
+            size_t config_key = config.find(key);
+
+            if (config_key == std::string::npos)
+                return false;
+
+            size_t config_eq = config.find('=', config_key);
+
+            if (config_eq == std::string::npos)
+                return false;
+
+            size_t config_value_start = config_eq + 1;
+
+            while (config_value_start < config.size() &&
+                   (config[config_value_start] == ' ' ||
+                    config[config_value_start] == '\t')) {
+                ++config_value_start;
+            }
+
+            size_t config_value_end = config_value_start;
+
+            while (config_value_end < config.size() &&
+                   config[config_value_end] != '\n' &&
+                   config[config_value_end] != '\r' &&
+                   config[config_value_end] != '#') {
+                ++config_value_end;
+            }
+
+            while (config_value_end > config_value_start &&
+                   (config[config_value_end - 1] == ' ' ||
+                    config[config_value_end - 1] == '\t')) {
+                --config_value_end;
+            }
+
+            config.replace(
+                config_value_start,
+                config_value_end - config_value_start,
+                value
+            );
+
+            return true;
+        };
+
+        copyValue(
+            config,
+            userConfig,
+            "ENABLE_FOLDER_SIZE_PERCENTAGES"
+        );
+
+        copyValue(
+            config,
+            userConfig,
+            "SIDEBAR_GROWTH_THRESHOLD_PERCENTAGE"
+        );
+
+        copyValue(
+            config,
+            userConfig,
+            "SIDEBAR_SELECTED_FOLDER_ICON"
+        );
+
+        copyValue(
+            config,
+            userConfig,
+            "SIDEBAR_SELECTED_FILE_ICON"
+        );
+
+        copyValue(
+            config,
+            userConfig,
+            "SIDEBAR_FOLDER_ICON"
+        );
+
+        copyValue(
+            config,
+            userConfig,
+            "SIDEBAR_FILE_ICON"
+        );
+
+        copyValue(
+            config,
+            userConfig,
+            "SIDEBAR_BACK_ICON"
+        );
+
+        copyValue(
+            config,
+            userConfig,
+            "SIDEBAR_GROWTH_COLOR"
+        );
+
+        copyValue(
+            config,
+            userConfig,
+            "SIDEBAR_SHRINK_COLOR"
+        );
+
+        copyValue(
+            config,
+            userConfig,
+            "CHART_MAX_SIZE_THRESHOLD_PERCENTAGE"
+        );
+
+        copyValue(
+            config,
+            userConfig,
+            "CHART_MAX_GENERATIONS"
+        );
+
+        copyValue(
+            config,
+            userConfig,
+            "CHART_DIM_FACTOR"
+        );
+
+        copyValue(
+            config,
+            "SIDEBAR_WIDTH = " + std::to_string(SIDEBAR_WIDTH),
+            "SIDEBAR_WIDTH"
         );
 
         std::ofstream out(path, std::ios::binary | std::ios::trunc);
