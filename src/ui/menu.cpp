@@ -146,7 +146,10 @@ Component BonsaiMenu::menu(ScreenInteractive* screen, std::shared_ptr<AppData::B
 
                 ss << (growth > 0 ? " " : " ");
 
-                if (abs_growth >= 1'000'000'000.0) {
+                if (abs_growth >= 1'000'000'000'000.0) {
+                    ss << std::fixed << std::setprecision(1)
+                       << abs_growth / 1'000'000'000'000.0 << 'T';
+                } else if (abs_growth >= 1'000'000'000.0) {
                     ss << std::fixed << std::setprecision(1)
                        << abs_growth / 1'000'000'000.0 << 'B';
                 } else if (abs_growth >= 1'000'000.0) {
