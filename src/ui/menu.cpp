@@ -142,11 +142,25 @@ Component BonsaiMenu::menu(ScreenInteractive* screen, std::shared_ptr<AppData::B
             if (std::abs(growth) > config.SIDEBAR_GROWTH_THRESHOLD_PERCENTAGE) {
                 std::ostringstream ss;
 
-                ss << (growth > 0 ? " " : " ")
-                   << std::fixed
-                   << std::setprecision(1)
-                   << std::abs(growth)
-                   << '%';
+                const double abs_growth = std::abs(growth);
+
+                ss << (growth > 0 ? " " : " ");
+
+                if (abs_growth >= 1'000'000'000.0) {
+                    ss << std::fixed << std::setprecision(1)
+                       << abs_growth / 1'000'000'000.0 << 'B';
+                } else if (abs_growth >= 1'000'000.0) {
+                    ss << std::fixed << std::setprecision(1)
+                       << abs_growth / 1'000'000.0 << 'M';
+                } else if (abs_growth >= 1'000.0) {
+                    ss << std::fixed << std::setprecision(1)
+                       << abs_growth / 1'000.0 << 'k';
+                } else {
+                    ss << std::fixed << std::setprecision(1)
+                       << abs_growth;
+                }
+
+                ss << '%';
 
                 growth_str = ss.str();
             }
