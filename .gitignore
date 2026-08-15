@@ -3,6 +3,7 @@ build/
 
 # editor
 .vscode/
+.cache/
 
 # extra
 tests/
