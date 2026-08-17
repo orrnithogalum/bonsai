@@ -263,9 +263,8 @@ private:
     using Setter = std::function<void(Config&, const std::string&)>;
 
     struct FieldSpec {
-        Setter setter;
-
         const char* key;
+        Setter setter;
         bool passthrough;
     };
 
