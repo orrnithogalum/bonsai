@@ -4,6 +4,7 @@
 #include "../../include/utils/format.hpp"
 
 #include <ftxui/dom/elements.hpp>
+#include <ftxui/screen/terminal.hpp>
 #include <ftxui/screen/color.hpp>
 
 #include <algorithm>
@@ -116,8 +117,22 @@ Component BonsaiMenu::menu(ScreenInteractive* screen, std::shared_ptr<AppData::B
         .active = Color::Default
     };
 
+    // Height of the terminal in rows, refreshed once per frame (see the Renderer at the end)
+    auto terminal_rows = std::make_shared<int>(Terminal::Size().dimy);
+
     // Plot the entry data on the menu in a nice way
-    options.entries_option.transform = [data](const EntryState& entry_state) {
+    options.entries_option.transform = [data, selected, terminal_rows](const EntryState& entry_state) {
+        /* Performance:
+        - FTXUI's Menu builds the element of every entry on every frame, not only of the ones on screen
+        - With thousands of entries, building and laying out all these rows is what makes scrolling lag
+        - The menu sits in a frame that keeps the selected entry in view, so an entry further away from
+          the selection than the height of the terminal can't be visible
+        - These entries get an empty line instead: same height, so the scrolling doesn't change
+        */
+        if (std::abs(entry_state.index - *selected) > *terminal_rows) {
+            return text("");
+        }
+
         const auto& item = (*data->menu_entries)[entry_state.index];
         const bool is_selected = entry_state.active;
         const Config& config = Config::get();
@@ -239,5 +254,11 @@ Component BonsaiMenu::menu(ScreenInteractive* screen, std::shared_ptr<AppData::B
     };
 
     // Menu is updated as labels update
-    return Menu(data->menu_labels.get(), selected, options);
+    auto menu = Menu(data->menu_labels.get(), selected, options);
+
+    // Same menu, the height of the terminal is just read before each frame is built
+    return Renderer(menu, [menu, terminal_rows] {
+        *terminal_rows = Terminal::Size().dimy;
+        return menu->Render();
+    });
 }

@@ -49,7 +49,12 @@ private:
         int depth;
     };
 
-    static void collectEntries(const fs::path& dir, std::vector<EntryInfo>& entries, int current_depth, int max_depth, Scanner* scanner);
+    /* Lists what the pie can draw under `dir`, down to `max_depth`.
+    - Top-level entries (depth 0) are all listed.
+    - Deeper entries are only listed if they reach `threshold` percent of `root_size`,
+      and only those directories are opened.
+    */
+    static void collectEntries(const fs::path& dir, std::vector<EntryInfo>& entries, int current_depth, int max_depth, uint64_t root_size, double threshold, Scanner* scanner);
 
     /* Draws a ring-shaped sector of an ellipse onto the Canvas.
     Parameters:
@@ -61,6 +66,9 @@ private:
         - label        -> Text displayed inside the slice (truncated if too long).
         - color        -> Fill color of the slice.
         - text_color   -> Color of the label text.
+        - drawn_by     -> One int per block of the canvas (width * (height / 2 + 1)), set to -1.
+                          Shared by all the slices of a frame.
+        - slice_id     -> Number of this slice in the frame (0, 1, 2...).
 
     Behavior:
         - Converts angles from degrees to radians.
@@ -69,7 +77,8 @@ private:
         - Uses incremental rotation (cos/sin delta) to avoid repeated trig calls.
         - For each angle step:
             - Interpolates radially from r_inner to outer radius.
-            - Draws blocks that fall within the elliptical boundary.
+            - Draws blocks that fall within the elliptical boundary,
+              once per block (drawn_by remembers which slice drew each block last).
         - Computes mid-angle and mid-radius to position the label
         approximately centered inside the slice.
         - Renders the label with foreground/background color contrast.
@@ -83,5 +92,5 @@ private:
         - Angular step (currently ~0.4°) is a visual/performance trade-off
         and could be made configurable.
     */
-    static void drawAngledBlockEllipseRingOffset(Canvas& c, int x1, int y1, int r1, int r2, int r3, double starting_angle, double angle, const std::string& label, const Color& color, const Color& text_color);
+    static void drawAngledBlockEllipseRingOffset(Canvas& c, int x1, int y1, int r1, int r2, int r3, double starting_angle, double angle, const std::string& label, const Color& color, const Color& text_color, std::vector<int>& drawn_by, int slice_id);
 };

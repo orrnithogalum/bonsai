@@ -16,7 +16,7 @@ It provides a lightweight, fast, and visually structured way to explore disk usa
   - Color-coded sections for files and folders
   - Labels for each item
 - Built using **CMake** and **FTXUI** for a modern TUI experience
-- Hashmap scan for efficient folder size lookups
+- Multi-threaded scan, with folder sizes kept in a tree for efficient lookups
 - Dynamic pie chart updates when navigating between folders in the sidebar  
 - Pie chart highlighting when hovering over folders or files 
 - Asynchronous UI rendering
@@ -79,7 +79,7 @@ paru -S bonsai
 
 Build manually from source:
 ```bash
-git clone https://github.com/LittleBigOwI/bonsai.git
+git clone https://github.com/orrnithogalum/bonsai.git
 
 cd bonsai
 mkdir build

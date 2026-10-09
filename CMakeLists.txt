@@ -17,7 +17,9 @@ set(SRC
     src/main.cpp
 
     src/core/app_data.cpp
+    src/core/dir_tree.cpp
     src/core/scanner.cpp
+    src/core/walker.cpp
 
     src/ui/menu.cpp
     src/ui/modal_confirm.cpp

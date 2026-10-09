@@ -37,8 +37,8 @@ public:
 
         int inner_radius;
         int outer_radius;
-        int offset_angle;
-        int sweep;
+        double offset_angle;
+        double sweep;
         int depth;
     };
 
