@@ -79,7 +79,7 @@ paru -S bonsai
 
 Build manually from source:
 ```bash
-git clone https://github.com/LittleBigOwI/bonsai.git
+git clone https://github.com/orrnithogalum/bonsai.git
 
 cd bonsai
 mkdir build
