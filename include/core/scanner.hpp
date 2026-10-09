@@ -1,8 +1,9 @@
 /* SCANNER
 Explanation:
-- This class recursively scans a filesystem path and computes the total sizes of directories.
-- It avoids counting the same inode twice (to handle hard links) using the `visited` set.
-- Thread-safe access to the `dir_sizes` map using a mutex.
+- This class scans a filesystem path and computes the total sizes of directories.
+- The scan runs on several threads (see Walker) and stores its results in a tree (see DirTree).
+- A directory is never counted twice, even if it can be reached through two paths.
+- Sizes can be read while the scan is running: they are atomics, so get() never waits for the scan.
 - Virtual filesystems (like /proc, /sys) and network shares (NFS, SMB) are ignored.
 - Public interface includes:
     - scan() to start scanning the root path.
@@ -11,8 +12,9 @@ Explanation:
 
 #pragma once
 
-#include <unordered_map>
-#include <unordered_set>
+#include "dir_tree.hpp"
+
+#include <atomic>
 #include <filesystem>
 #include <mutex>
 
@@ -34,7 +36,7 @@ public:
         double percent_change; // (new-old)/old * 100, 0 if old==0 and new==0
     };
 
-    Scanner(const fs::path& _path, const fs::path& _db_path) : path(_path), db_path(_db_path) {};
+    Scanner(const fs::path& _path, const fs::path& _db_path) : path(_path), db_path(_db_path), tree(_path.string()) {};
 
     void scan();
     void stop();
@@ -52,45 +54,11 @@ private:
     fs::path path;
     fs::path db_path;
 
-    std::unordered_map<std::string, std::pair<uint64_t, uint64_t>> dir_sizes;
-    std::mutex map_mutex;
+    DirTree tree;
 
-    std::mutex stop_mutex;
-    bool done = false;
+    // Set when the scan has completed, or to make it stop early
+    std::atomic<bool> done{false};
 
-    /* Inode struct
-    - Represents a filesystem inode (device + inode number)
-    - Used to avoid double-counting hard links
-    - Fully private and only visible inside Scanner
-    */
-    struct Inode {
-        dev_t dev;  // Device ID
-        ino_t ino;  // Inode number
-
-        bool operator==(const Inode& other) const {
-            return dev == other.dev && ino == other.ino;
-        }
-    };
-
-    /* InodeHash struct
-    - Hash function for unordered_set of Inode
-    - Combines device ID and inode number
-    */
-    struct InodeHash {
-        std::size_t operator()(const Inode& i) const {
-            return std::hash<dev_t>()(i.dev) ^ std::hash<ino_t>()(i.ino);
-        }
-    };
-
-    std::unordered_set<Inode, InodeHash> visited;
-
-    bool isVirtualFs(const fs::path& path);
-
-    /* computeDirSizes(dir)
-    - Recursively computes the total size of a directory.
-    - Adds sizes of files and subdirectories.
-    - Skips symlinks, virtual filesystems, and already visited inodes.
-    - Updates `dir_sizes` in a thread-safe manner.
-    */
-    uint64_t computeDirSizes(const fs::path& dir);
+    // Only one thread writes the snapshot file at a time
+    std::mutex snapshot_mutex;
 };

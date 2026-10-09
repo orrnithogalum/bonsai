@@ -1,0 +1,1107 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 446eecb..1ae10ee 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -17,7 +17,9 @@ set(SRC
+     src/main.cpp
+ 
+     src/core/app_data.cpp
++    src/core/dir_tree.cpp
+     src/core/scanner.cpp
++    src/core/walker.cpp
+ 
+     src/ui/menu.cpp
+     src/ui/modal_confirm.cpp
+diff --git a/README.md b/README.md
+index 0781984..ab0e304 100644
+--- a/README.md
++++ b/README.md
+@@ -16,7 +16,7 @@ It provides a lightweight, fast, and visually structured way to explore disk usa
+   - Color-coded sections for files and folders
+   - Labels for each item
+ - Built using **CMake** and **FTXUI** for a modern TUI experience
+-- Hashmap scan for efficient folder size lookups
++- Multi-threaded scan, with folder sizes kept in a tree for efficient lookups
+ - Dynamic pie chart updates when navigating between folders in the sidebar  
+ - Pie chart highlighting when hovering over folders or files 
+ - Asynchronous UI rendering
+diff --git a/include/config/config.hpp b/include/config/config.hpp
+index f9424ac..2fcdb52 100644
+--- a/include/config/config.hpp
++++ b/include/config/config.hpp
+@@ -45,6 +45,7 @@ public:
+ 
+     int CHART_MAX_GENERATIONS = 4;
+     int SIDEBAR_WIDTH = 40;
++    int SCANNER_THREADS = 0;
+ 
+     double SIDEBAR_GROWTH_THRESHOLD_PERCENTAGE = 0.2;
+     double CHART_MAX_SIZE_THRESHOLD_PERCENTAGE = 2;
+@@ -292,6 +293,7 @@ private:
+             {"CHART_MAX_GENERATIONS",               makeSetter(&Config::CHART_MAX_GENERATIONS),               true},
+             {"CHART_DIM_FACTOR",                    makeSetter(&Config::CHART_DIM_FACTOR),                    true},
+             {"ENABLE_FOLDER_SIZE_PERCENTAGES",      makeSetter(&Config::ENABLE_FOLDER_SIZE_PERCENTAGES),      true},
++            {"SCANNER_THREADS",                     makeSetter(&Config::SCANNER_THREADS),                     true},
+         };
+         return table;
+     }
+diff --git a/include/core/dir_tree.hpp b/include/core/dir_tree.hpp
+new file mode 100644
+index 0000000..7b10cc8
+--- /dev/null
++++ b/include/core/dir_tree.hpp
+@@ -0,0 +1,99 @@
++/* DIR TREE
++Explanation:
++- Every scanned directory is one node in a tree, instead of one entry in a path -> size hashmap.
++- This is the layout idea of fsearch's name index (index.rs): a directory's sub-directories live
++  together in one sorted block, so a path is resolved by a binary search per component and no
++  full path string is ever stored.
++- Built for one scan running on many threads while the UI reads from it:
++    - Nodes live in chunks that never move, so a node reference stays valid forever.
++    - A directory's block of children is published once, fully built, through an atomic pointer.
++    - Sizes are atomics: scanner threads add to them, UI threads read them, nobody takes a lock.
++- A node's size is the total of its whole subtree. It grows while the scan is running.
++*/
++
++#pragma once
++
++#include <atomic>
++#include <cstdint>
++#include <functional>
++#include <mutex>
++#include <string>
++#include <string_view>
++#include <vector>
++
++class DirTree {
++public:
++    static constexpr uint32_t NONE = UINT32_MAX;
++    static constexpr uint32_t ROOT = 0;
++
++    /* Block
++    - The sub-directories of one directory, sorted by name.
++    - Child number i is node `first + i`: ids are handed out in runs, so no id is stored per child.
++    - Names are stored back to back, each followed by a '\0'.
++    - Never modified once it is attached to its directory.
++    */
++    struct Block {
++        uint32_t first = 0;
++        std::vector<uint32_t> offsets; // count + 1 entries into `names`
++        std::vector<char> names;
++
++        uint32_t count() const { return static_cast<uint32_t>(offsets.size()) - 1; }
++        const char* c_str(uint32_t i) const { return names.data() + offsets[i]; }
++        std::string_view name(uint32_t i) const { return {c_str(i), offsets[i + 1] - offsets[i] - 1}; }
++    };
++
++    struct Node {
++        std::atomic<uint64_t> size{0};            // Bytes in this directory and everything below it
++        std::atomic<uint64_t> snapped{0};         // Same, as saved by the previous run
++        std::atomic<const Block*> children{nullptr}; // nullptr: not listed yet, or no sub-directories
++        uint32_t parent = NONE;
++        std::atomic<bool> removed{false};
++    };
++
++    explicit DirTree(const std::string& root_path);
++    ~DirTree();
++
++    DirTree(const DirTree&) = delete;
++    DirTree& operator=(const DirTree&) = delete;
++
++    Node& node(uint32_t id) const;
++
++    /* attach(dir, names)
++    - Records the sub-directories of `dir`. `names` are '\0' separated and need no order.
++    - Returns the published block (nullptr if the tree is full), whose children can now be scanned.
++    - Called at most once per directory, by the thread that listed it.
++    */
++    const Block* attach(uint32_t dir, const std::vector<char>& names, uint32_t count);
++
++    // Adds / removes `bytes` on `dir` and on every directory above it.
++    void add(uint32_t dir, uint64_t bytes);
++    void subtract(uint32_t dir, uint64_t bytes);
++
++    // Resolves an absolute path to its node, or NONE if it isn't a (known) directory under the root.
++    uint32_t find(std::string_view path) const;
++
++    // Writes the absolute path of `id` into `out`.
++    void path(uint32_t id, std::string& out) const;
++
++    // Calls fn(path, node) for every directory, parents before children.
++    void forEach(const std::function<void(const std::string&, const Node&)>& fn) const;
++
++    uint32_t count() const;
++
++private:
++    /* Node storage
++    - Chunk c holds (1024 << c) nodes, so 23 chunks cover every 32 bit id.
++    - A chunk is allocated once and never moves or shrinks.
++    */
++    static constexpr int FIRST_CHUNK_BITS = 10;
++    static constexpr int MAX_CHUNKS = 23;
++
++    static int chunkOf(uint32_t id, uint32_t& offset);
++    bool reserve(uint64_t first, uint64_t last);
++
++    std::atomic<Node*> chunks[MAX_CHUNKS] = {};
++    std::atomic<uint64_t> next_id{1};
++    std::mutex chunk_mutex;
++
++    std::string root; // Without trailing slash, so "/" is stored as ""
++};
+diff --git a/include/core/scanner.hpp b/include/core/scanner.hpp
+index 23f5ee2..06343bd 100644
+--- a/include/core/scanner.hpp
++++ b/include/core/scanner.hpp
+@@ -1,8 +1,9 @@
+ /* SCANNER
+ Explanation:
+-- This class recursively scans a filesystem path and computes the total sizes of directories.
+-- It avoids counting the same inode twice (to handle hard links) using the `visited` set.
+-- Thread-safe access to the `dir_sizes` map using a mutex.
++- This class scans a filesystem path and computes the total sizes of directories.
++- The scan runs on several threads (see Walker) and stores its results in a tree (see DirTree).
++- A directory is never counted twice, even if it can be reached through two paths.
++- Sizes can be read while the scan is running: they are atomics, so get() never waits for the scan.
+ - Virtual filesystems (like /proc, /sys) and network shares (NFS, SMB) are ignored.
+ - Public interface includes:
+     - scan() to start scanning the root path.
+@@ -11,8 +12,9 @@ Explanation:
+ 
+ #pragma once
+ 
+-#include <unordered_map>
+-#include <unordered_set>
++#include "dir_tree.hpp"
++
++#include <atomic>
+ #include <filesystem>
+ #include <mutex>
+ 
+@@ -34,7 +36,7 @@ public:
+         double percent_change; // (new-old)/old * 100, 0 if old==0 and new==0
+     };
+ 
+-    Scanner(const fs::path& _path, const fs::path& _db_path) : path(_path), db_path(_db_path) {};
++    Scanner(const fs::path& _path, const fs::path& _db_path) : path(_path), db_path(_db_path), tree(_path.string()) {};
+ 
+     void scan();
+     void stop();
+@@ -52,45 +54,11 @@ private:
+     fs::path path;
+     fs::path db_path;
+ 
+-    std::unordered_map<std::string, std::pair<uint64_t, uint64_t>> dir_sizes;
+-    std::mutex map_mutex;
+-
+-    std::mutex stop_mutex;
+-    bool done = false;
+-
+-    /* Inode struct
+-    - Represents a filesystem inode (device + inode number)
+-    - Used to avoid double-counting hard links
+-    - Fully private and only visible inside Scanner
+-    */
+-    struct Inode {
+-        dev_t dev;  // Device ID
+-        ino_t ino;  // Inode number
++    DirTree tree;
+ 
+-        bool operator==(const Inode& other) const {
+-            return dev == other.dev && ino == other.ino;
+-        }
+-    };
++    // Set when the scan has completed, or to make it stop early
++    std::atomic<bool> done{false};
+ 
+-    /* InodeHash struct
+-    - Hash function for unordered_set of Inode
+-    - Combines device ID and inode number
+-    */
+-    struct InodeHash {
+-        std::size_t operator()(const Inode& i) const {
+-            return std::hash<dev_t>()(i.dev) ^ std::hash<ino_t>()(i.ino);
+-        }
+-    };
+-
+-    std::unordered_set<Inode, InodeHash> visited;
+-
+-    bool isVirtualFs(const fs::path& path);
+-
+-    /* computeDirSizes(dir)
+-    - Recursively computes the total size of a directory.
+-    - Adds sizes of files and subdirectories.
+-    - Skips symlinks, virtual filesystems, and already visited inodes.
+-    - Updates `dir_sizes` in a thread-safe manner.
+-    */
+-    uint64_t computeDirSizes(const fs::path& dir);
++    // Only one thread writes the snapshot file at a time
++    std::mutex snapshot_mutex;
+ };
+diff --git a/include/core/walker.hpp b/include/core/walker.hpp
+new file mode 100644
+index 0000000..b63246a
+--- /dev/null
++++ b/include/core/walker.hpp
+@@ -0,0 +1,102 @@
++/* WALKER
++Explanation:
++- Scans a directory tree on several threads and fills a DirTree with the size of every directory.
++- This is the Linux version of fsearch's crawler (walk.rs):
++    - One getdents64() call returns a few thousand names together with their type, so a
++      directory is read in one or two system calls and only regular files need a stat.
++    - Files are stat'ed relative to the open directory (fstatat), so the kernel never has to
++      walk the whole path again for each file.
++    - Every directory is a task. Each thread works depth first on its own tasks and steals the
++      oldest tasks of another thread when it runs out, which keeps all threads busy on any tree shape.
++- Same rules as the old recursive scan:
++    - Symlinks are skipped, so are sockets, pipes and devices.
++    - /proc, /sys and network shares (NFS, SMB) are not entered.
++    - A directory is only counted once, even if it is reachable twice (bind mounts).
++*/
++
++#pragma once
++
++#include "dir_tree.hpp"
++
++#include <atomic>
++#include <mutex>
++#include <sys/types.h>
++#include <unordered_set>
++#include <vector>
++
++class Walker {
++public:
++    // threads == 0 picks a count from the number of CPU cores
++    Walker(DirTree& _tree, const std::atomic<bool>& _stop, unsigned threads);
++
++    // Scans the whole tree. Returns when every directory was visited, or once `stop` is set.
++    void run();
++
++private:
++    struct Task {
++        uint32_t dir;      // Node to scan
++        dev_t parent_dev;  // Device its parent is on, to notice mount points
++    };
++
++    /* Queue
++    - Tasks of one thread. The owner pushes and pops at the back (depth first).
++    - Other threads steal from the front, where the directories closest to the root are.
++    - Aligned so two threads never share a cache line.
++    */
++    struct alignas(64) Queue {
++        std::mutex mutex;
++        std::vector<Task> tasks;
++    };
++
++    // Per-thread buffers, reused for every directory
++    struct Scratch {
++        std::vector<char> entries;  // getdents64() output
++        std::vector<char> names;    // Sub-directory names of the current directory
++        std::vector<Task> stolen;
++        std::string path;
++    };
++
++    /* Seen
++    - Directories already visited, as (device, inode).
++    - Split in buckets with their own lock so threads rarely wait for each other.
++    */
++    struct Inode {
++        dev_t dev;
++        ino_t ino;
++
++        bool operator==(const Inode& other) const {
++            return dev == other.dev && ino == other.ino;
++        }
++    };
++
++    struct InodeHash {
++        std::size_t operator()(const Inode& i) const {
++            return std::hash<uint64_t>()(static_cast<uint64_t>(i.ino) * 0x9E3779B97F4A7C15ull ^ static_cast<uint64_t>(i.dev));
++        }
++    };
++
++    struct alignas(64) SeenBucket {
++        std::mutex mutex;
++        std::unordered_set<Inode, InodeHash> inodes;
++    };
++
++    static constexpr size_t SEEN_BUCKETS = 64;
++
++    void work(unsigned self);
++    void visit(const Task& task, unsigned self, Scratch& scratch);
++
++    bool pop(unsigned self, Task& task);
++    bool steal(unsigned self, Task& task, Scratch& scratch);
++    bool firstVisit(dev_t dev, ino_t ino);
++
++    static bool isSkippedFs(int fd);
++
++    DirTree& tree;
++    const std::atomic<bool>& stop;
++
++    std::vector<Queue> queues;
++    std::vector<SeenBucket> seen;
++
++    // Tasks queued or being worked on. The scan is over when this reaches zero.
++    std::atomic<uint64_t> pending{0};
++};
+diff --git a/res/bonsai.default.conf b/res/bonsai.default.conf
+index 410ac8f..1eb6466 100644
+--- a/res/bonsai.default.conf
++++ b/res/bonsai.default.conf
+@@ -6,6 +6,7 @@
+ # App Settings
+ # -----------------------
+ ENABLE_FOLDER_SIZE_PERCENTAGES = true
++SCANNER_THREADS = 0                         # Threads used to scan the disk (0 = automatic)
+ 
+ # -----------------------
+ # Sidebar Settings
+diff --git a/src/core/dir_tree.cpp b/src/core/dir_tree.cpp
+new file mode 100644
+index 0000000..d19b968
+--- /dev/null
++++ b/src/core/dir_tree.cpp
+@@ -0,0 +1,240 @@
++#include "../../include/core/dir_tree.hpp"
++
++#include <algorithm>
++#include <cstring>
++#include <numeric>
++
++DirTree::DirTree(const std::string& root_path) : root(root_path) {
++    while (!root.empty() && root.back() == '/')
++        root.pop_back();
++
++    reserve(ROOT, ROOT);
++}
++
++DirTree::~DirTree() {
++    const uint64_t used = std::min<uint64_t>(next_id.load(), NONE);
++
++    for (uint64_t id = 0; id < used; id++) {
++        uint32_t offset;
++        Node* chunk = chunks[chunkOf(static_cast<uint32_t>(id), offset)].load();
++
++        if (chunk)
++            delete chunk[offset].children.load();
++    }
++
++    for (auto& chunk : chunks)
++        delete[] chunk.load();
++}
++
++int DirTree::chunkOf(uint32_t id, uint32_t& offset) {
++    const uint64_t v = (static_cast<uint64_t>(id) >> FIRST_CHUNK_BITS) + 1;
++    const int chunk = 63 - __builtin_clzll(v);
++
++    offset = id - static_cast<uint32_t>(((uint64_t{1} << chunk) - 1) << FIRST_CHUNK_BITS);
++    return chunk;
++}
++
++DirTree::Node& DirTree::node(uint32_t id) const {
++    uint32_t offset;
++    const int chunk = chunkOf(id, offset);
++
++    return chunks[chunk].load(std::memory_order_acquire)[offset];
++}
++
++uint32_t DirTree::count() const {
++    return static_cast<uint32_t>(std::min<uint64_t>(next_id.load(), NONE));
++}
++
++// Makes sure the chunks holding ids first..last exist.
++bool DirTree::reserve(uint64_t first, uint64_t last) {
++    if (last >= NONE)
++        return false;
++
++    uint32_t unused;
++    const int from = chunkOf(static_cast<uint32_t>(first), unused);
++    const int to = chunkOf(static_cast<uint32_t>(last), unused);
++
++    for (int c = from; c <= to; c++) {
++        if (chunks[c].load(std::memory_order_acquire))
++            continue;
++
++        std::lock_guard<std::mutex> lock(chunk_mutex);
++        if (!chunks[c].load(std::memory_order_relaxed))
++            chunks[c].store(new Node[size_t{1} << (FIRST_CHUNK_BITS + c)], std::memory_order_release);
++    }
++
++    return true;
++}
++
++const DirTree::Block* DirTree::attach(uint32_t dir, const std::vector<char>& names, uint32_t count) {
++    if (count == 0)
++        return nullptr;
++
++    // Where each name starts, then the same list sorted by name
++    std::vector<uint32_t> starts;
++    starts.reserve(count);
++
++    for (uint32_t at = 0; at < names.size(); at += std::strlen(&names[at]) + 1)
++        starts.push_back(at);
++
++    std::sort(starts.begin(), starts.end(), [&names](uint32_t a, uint32_t b) {
++        return std::strcmp(&names[a], &names[b]) < 0;
++    });
++
++    auto* block = new Block();
++    block->offsets.reserve(count + 1);
++    block->names.reserve(names.size());
++
++    for (uint32_t start : starts) {
++        const size_t len = std::strlen(&names[start]) + 1;
++
++        block->offsets.push_back(static_cast<uint32_t>(block->names.size()));
++        block->names.insert(block->names.end(), &names[start], &names[start] + len);
++    }
++    block->offsets.push_back(static_cast<uint32_t>(block->names.size()));
++
++    // Ids for the children: one run, taken in a single step
++    const uint64_t first = next_id.fetch_add(count, std::memory_order_relaxed);
++    if (!reserve(first, first + count - 1)) {
++        delete block;
++        return nullptr;
++    }
++
++    block->first = static_cast<uint32_t>(first);
++    for (uint32_t i = 0; i < count; i++)
++        node(block->first + i).parent = dir;
++
++    // From here on other threads can see the children
++    node(dir).children.store(block, std::memory_order_release);
++    return block;
++}
++
++void DirTree::add(uint32_t dir, uint64_t bytes) {
++    if (bytes == 0)
++        return;
++
++    for (uint32_t id = dir; id != NONE; id = node(id).parent)
++        node(id).size.fetch_add(bytes, std::memory_order_relaxed);
++}
++
++void DirTree::subtract(uint32_t dir, uint64_t bytes) {
++    for (uint32_t id = dir; id != NONE; id = node(id).parent) {
++        auto& size = node(id).size;
++        uint64_t current = size.load(std::memory_order_relaxed);
++
++        // Never go below zero: the disk may have changed since the scan
++        while (!size.compare_exchange_weak(current, current > bytes ? current - bytes : 0)) {}
++    }
++}
++
++uint32_t DirTree::find(std::string_view path) const {
++    if (path.size() < root.size() || path.compare(0, root.size(), root) != 0)
++        return NONE;
++
++    path.remove_prefix(root.size());
++    if (!path.empty() && path.front() != '/')
++        return NONE; // "/home/user2" is not inside "/home/user"
++
++    uint32_t id = ROOT;
++
++    while (true) {
++        while (!path.empty() && path.front() == '/')
++            path.remove_prefix(1);
++
++        if (node(id).removed.load(std::memory_order_relaxed))
++            return NONE;
++
++        if (path.empty())
++            return id;
++
++        const size_t slash = path.find('/');
++        const std::string_view name = path.substr(0, slash);
++        path.remove_prefix(slash == std::string_view::npos ? path.size() : slash);
++
++        const Block* block = node(id).children.load(std::memory_order_acquire);
++        if (!block)
++            return NONE;
++
++        // Binary search in the sorted names of this directory
++        uint32_t low = 0;
++        uint32_t high = block->count();
++
++        while (low < high) {
++            const uint32_t mid = low + (high - low) / 2;
++
++            if (block->name(mid) < name)
++                low = mid + 1;
++            else
++                high = mid;
++        }
++
++        if (low == block->count() || block->name(low) != name)
++            return NONE;
++
++        id = block->first + low;
++    }
++}
++
++void DirTree::path(uint32_t id, std::string& out) const {
++    if (id == ROOT) {
++        out = root.empty() ? "/" : root;
++        return;
++    }
++
++    // First pass measures, second pass writes the names from the end backwards
++    size_t length = root.size();
++    for (uint32_t at = id; at != ROOT; at = node(at).parent) {
++        const Block* block = node(node(at).parent).children.load(std::memory_order_acquire);
++        length += 1 + block->name(at - block->first).size();
++    }
++
++    out.resize(length);
++    std::memcpy(out.data(), root.data(), root.size());
++
++    size_t end = length;
++    for (uint32_t at = id; at != ROOT; at = node(at).parent) {
++        const Block* block = node(node(at).parent).children.load(std::memory_order_acquire);
++        const std::string_view name = block->name(at - block->first);
++
++        end -= name.size();
++        std::memcpy(out.data() + end, name.data(), name.size());
++        out[--end] = '/';
++    }
++}
++
++void DirTree::forEach(const std::function<void(const std::string&, const Node&)>& fn) const {
++    struct Frame {
++        uint32_t id;
++        size_t path_length; // Length of the parent's path
++        std::string_view name;
++    };
++
++    const std::string slash = "/";
++    std::string current = root;
++    std::vector<Frame> stack;
++    stack.push_back({ROOT, root.size(), {}});
++
++    while (!stack.empty()) {
++        const Frame frame = stack.back();
++        stack.pop_back();
++
++        const Node& dir = node(frame.id);
++        if (dir.removed.load(std::memory_order_relaxed))
++            continue;
++
++        current.resize(frame.path_length);
++        if (frame.id != ROOT) {
++            current += '/';
++            current += frame.name;
++        }
++
++        fn(current.empty() ? slash : current, dir);
++
++        const Block* block = dir.children.load(std::memory_order_acquire);
++        if (!block)
++            continue;
++
++        for (uint32_t i = block->count(); i-- > 0;)
++            stack.push_back({block->first + i, current.size(), block->name(i)});
++    }
++}
+diff --git a/src/core/scanner.cpp b/src/core/scanner.cpp
+index db0ad40..87d10b0 100644
+--- a/src/core/scanner.cpp
++++ b/src/core/scanner.cpp
+@@ -1,41 +1,12 @@
+ #include "../../include/core/scanner.hpp"
+ 
+ #include "../../include/config/config.hpp"
++#include "../../include/core/walker.hpp"
+ 
++#include <algorithm>
+ #include <filesystem>
+-#include <linux/magic.h>
+-#include <sys/statfs.h>
+-#include <sys/stat.h>
+ #include <fstream>
+ 
+-bool Scanner::isVirtualFs(const fs::path& path) {
+-    std::string strPath = path.string();
+-
+-    if(
+-        strPath.find("/proc") == 0 ||
+-        strPath.find("/sys")  == 0
+-        // strPath.find("/dev")  == 0
+-        // strPath.find("/run")  == 0
+-        // strPath.find("/tmp")  == 0
+-    ) { return true; }
+-
+-    // Virtual filesystems
+-    struct statfs stfs;
+-    if (statfs(path.c_str(), &stfs) != 0)
+-        return true;
+-
+-    // Ignore network shares
+-    switch (stfs.f_type) {
+-        case NFS_SUPER_MAGIC:
+-        case SMB_SUPER_MAGIC:
+-            return true;
+-        default:
+-            break;
+-    }
+-
+-    return false;
+-}
+-
+ void Scanner::loadSnapshot() {
+     std::ifstream in(this->db_path);
+ 
+@@ -53,64 +24,22 @@ void Scanner::loadSnapshot() {
+         std::string sizeStr = line.substr(tabPos + 1);
+         try {
+             uint64_t size = std::stoull(sizeStr);
+-            dir_sizes[path].second = size;
++
++            // Directories that no longer exist are dropped
++            uint32_t id = tree.find(path);
++            if (id != DirTree::NONE)
++                tree.node(id).snapped.store(size, std::memory_order_relaxed);
+         } catch (const std::exception&) {
+             continue;
+         }
+     }
+ }
+ 
+-uint64_t Scanner::computeDirSizes(const fs::path& dir) {
+-    {
+-        std::lock_guard<std::mutex> lock(stop_mutex);
+-        if(this->done) { return 0; }
+-    }
+-
+-    uint64_t total_size = 0;
+-
+-    // Some of these entry types can cause loops in scanning and have no real value
+-    if (!fs::exists(dir) || !fs::is_directory(dir) || isVirtualFs(dir))
+-        return 0;
+-
+-    struct stat st;
+-    if (lstat(dir.c_str(), &st) != 0)
+-        return 0;
+-
+-    // Make sure wh haven't visited anything
+-    Inode inode{st.st_dev, st.st_ino};
+-    if (visited.find(inode) != visited.end())
+-        return 0;
+-
+-    visited.insert(inode);
+-
+-    for (auto& entry : fs::directory_iterator(dir, fs::directory_options::skip_permission_denied)) {
+-        try {
+-            if (fs::is_symlink(entry.path()))
+-                continue;
+-
+-            if (fs::is_regular_file(entry.path())) {
+-                total_size += fs::file_size(entry);
+-            }
+-            else if (fs::is_directory(entry.path())) {
+-                total_size += computeDirSizes(entry.path());
+-            }
+-
+-            {
+-                std::unique_lock lock(map_mutex);
+-                dir_sizes[dir.string()].first = total_size;
+-                dir_sizes[dir.string()].second = 0;
+-            }
+-        } catch (const fs::filesystem_error&) {}
+-    }
+-
+-    return total_size;
+-}
+-
+ void Scanner::snapshot() {
+     auto config = Config::get();
+     if(!config.ENABLE_FOLDER_SIZE_PERCENTAGES) return;
+ 
+-    std::lock_guard<std::mutex> lock(map_mutex);
++    std::lock_guard<std::mutex> lock(snapshot_mutex);
+ 
+     std::error_code ec;
+     if (this->db_path.has_parent_path()) {
+@@ -120,17 +49,21 @@ void Scanner::snapshot() {
+     std::ofstream out(this->db_path, std::ios::trunc);
+     if (!out.is_open()) return;
+ 
+-    for (const auto& [path, size] : dir_sizes) {
+-        out << path << '\t' << size.first << '\n';
+-    }
++    tree.forEach([&out](const std::string& path, const DirTree::Node& dir) {
++        uint64_t size = dir.size.load(std::memory_order_relaxed);
++
++        // An empty directory reads back as 0 anyway
++        if (size != 0) {
++            out << path << '\t' << size << '\n';
++        }
++    });
+ }
+ 
+ uint64_t Scanner::get(const fs::path& path) {
+-    std::lock_guard<std::mutex> lock(map_mutex);
+-    auto it = dir_sizes.find(path.string());
++    uint32_t id = tree.find(path.native());
+ 
+-    if (it != dir_sizes.end())
+-        return it->second.first;
++    if (id != DirTree::NONE)
++        return tree.node(id).size.load(std::memory_order_relaxed);
+ 
+     return 0;
+ }
+@@ -139,32 +72,27 @@ uint64_t Scanner::getSnapped(const fs::path& path) {
+     auto config = Config::get();
+     if(!config.ENABLE_FOLDER_SIZE_PERCENTAGES) return 0;
+ 
+-    std::lock_guard<std::mutex> lock(map_mutex);
+-    auto it = dir_sizes.find(path.string());
++    uint32_t id = tree.find(path.native());
+ 
+-    if (it != dir_sizes.end())
+-        return it->second.second;
++    if (id != DirTree::NONE)
++        return tree.node(id).snapped.load(std::memory_order_relaxed);
+ 
+     return 0;
+ }
+ 
+ Scanner::ScannerRemoveResult Scanner::remove(const fs::path& path) {
+-    {
+-        std::lock_guard<std::mutex> lock(stop_mutex);
+-
+-        if (!this->done) {
+-            return ScannerRemoveResult{"Scanner hasn't completed yet.", true};
+-        }
++    if (!this->done) {
++        return ScannerRemoveResult{"Scanner hasn't completed yet.", true};
+     }
+ 
+-    std::string target = path.string();
+-
+     uint64_t removed_size = 0;
++    uint32_t removed_dir = DirTree::NONE;
+ 
+     if(fs::is_directory(path)) {
+-        {
+-            std::lock_guard<std::mutex> lock(map_mutex);
+-            removed_size = dir_sizes[path.string()].first;
++        removed_dir = tree.find(path.native());
++
++        if (removed_dir != DirTree::NONE) {
++            removed_size = tree.node(removed_dir).size.load();
+         }
+     } else {
+         std::error_code ec;
+@@ -185,25 +113,15 @@ Scanner::ScannerRemoveResult Scanner::remove(const fs::path& path) {
+         return ScannerRemoveResult{ec.message(), true};;
+     }
+ 
+-    {
+-        std::lock_guard<std::mutex> lock(map_mutex);
+-        fs::path current = path.parent_path();
+-
+-        while (!current.empty()) {
+-            dir_sizes[current.string()].first -= removed_size;
+-
+-            if (dir_sizes[current.string()].first < 0) {
+-                dir_sizes[current.string()].first = 0;
+-            }
++    // Every directory above the removed entry just got smaller
++    uint32_t parent = tree.find(path.parent_path().native());
+ 
+-            if (fs::equivalent(this->path, current)) {
+-                break;
+-            }
+-
+-            current = current.parent_path();
+-        }
++    if (parent != DirTree::NONE) {
++        tree.subtract(parent, removed_size);
++    }
+ 
+-        dir_sizes.erase(target);
++    if (removed_dir != DirTree::NONE) {
++        tree.node(removed_dir).removed = true;
+     }
+ 
+     this->snapshot();
+@@ -211,25 +129,17 @@ Scanner::ScannerRemoveResult Scanner::remove(const fs::path& path) {
+ }
+ 
+ void Scanner::scan() {
+-    computeDirSizes(this->path);
+-    loadSnapshot();
++    Walker walker(tree, done, std::max(0, Config::get().SCANNER_THREADS));
++    walker.run();
+ 
+-    {
+-        std::lock_guard lock(stop_mutex);
+-        this->done = true;
+-    }
++    loadSnapshot();
++    this->done = true;
+ }
+ 
+ void Scanner::stop() {
+-    {
+-        std::lock_guard lock(stop_mutex);
+-        this->done = true;
+-    }
++    this->done = true;
+ }
+ 
+ bool Scanner::isDone() {
+-    {
+-        std::lock_guard lock(stop_mutex);
+-        return this->done;
+-    }
++    return this->done;
+ }
+diff --git a/src/core/walker.cpp b/src/core/walker.cpp
+new file mode 100644
+index 0000000..3dbf028
+--- /dev/null
++++ b/src/core/walker.cpp
+@@ -0,0 +1,238 @@
++#include "../../include/core/walker.hpp"
++
++#include <algorithm>
++#include <cerrno>
++#include <chrono>
++#include <cstddef>
++#include <cstring>
++#include <fcntl.h>
++#include <linux/magic.h>
++#include <sys/stat.h>
++#include <sys/syscall.h>
++#include <sys/vfs.h>
++#include <system_error>
++#include <thread>
++#include <unistd.h>
++
++namespace {
++
++// What getdents64() writes, one after the other, each `reclen` bytes long
++struct KernelDirent {
++    uint64_t ino;
++    int64_t off;
++    unsigned short reclen;
++    unsigned char type;
++    char name[1];
++};
++
++constexpr unsigned char TYPE_UNKNOWN = 0; // DT_UNKNOWN: the filesystem doesn't tell, stat is needed
++constexpr unsigned char TYPE_DIR = 4;     // DT_DIR
++constexpr unsigned char TYPE_FILE = 8;    // DT_REG
++
++constexpr size_t ENTRIES_BUFFER = 256 * 1024;
++
++/* Thread count when the config says 0 (automatic)
++- Two per core: on a disk that isn't cached yet most threads are waiting for it, not using the CPU.
++- Capped, because past that point the threads mostly wait for each other inside the kernel.
++*/
++constexpr unsigned AUTO_THREADS_PER_CORE = 2;
++constexpr unsigned MAX_AUTO_THREADS = 16;
++constexpr unsigned MAX_THREADS = 256;
++
++}
++
++Walker::Walker(DirTree& _tree, const std::atomic<bool>& _stop, unsigned threads) : tree(_tree), stop(_stop), seen(SEEN_BUCKETS) {
++    if (threads == 0)
++        threads = std::min(std::max(1u, std::thread::hardware_concurrency()) * AUTO_THREADS_PER_CORE, MAX_AUTO_THREADS);
++
++    queues = std::vector<Queue>(std::min(threads, MAX_THREADS));
++}
++
++bool Walker::isSkippedFs(int fd) {
++    struct statfs stfs;
++    if (fstatfs(fd, &stfs) != 0)
++        return true;
++
++    switch (stfs.f_type) {
++        // Virtual filesystems
++        case PROC_SUPER_MAGIC:
++        case SYSFS_MAGIC:
++        // Network shares
++        case NFS_SUPER_MAGIC:
++        case SMB_SUPER_MAGIC:
++            return true;
++        default:
++            return false;
++    }
++}
++
++bool Walker::firstVisit(dev_t dev, ino_t ino) {
++    const Inode inode{dev, ino};
++    SeenBucket& bucket = seen[InodeHash()(inode) % SEEN_BUCKETS];
++
++    std::lock_guard<std::mutex> lock(bucket.mutex);
++    return bucket.inodes.insert(inode).second;
++}
++
++void Walker::run() {
++    // The root has no parent: (dev_t)-1 is never a real device, so its filesystem is always checked
++    pending.store(1);
++    queues[0].tasks.push_back(Task{DirTree::ROOT, static_cast<dev_t>(-1)});
++
++    // If the system refuses more threads, the ones we got (at least this one) do the whole scan
++    std::vector<std::thread> threads;
++    try {
++        for (unsigned i = 1; i < queues.size(); i++)
++            threads.emplace_back(&Walker::work, this, i);
++    } catch (const std::system_error&) {}
++
++    work(0);
++
++    for (auto& thread : threads)
++        thread.join();
++}
++
++bool Walker::pop(unsigned self, Task& task) {
++    Queue& queue = queues[self];
++    std::lock_guard<std::mutex> lock(queue.mutex);
++
++    if (queue.tasks.empty())
++        return false;
++
++    task = queue.tasks.back();
++    queue.tasks.pop_back();
++    return true;
++}
++
++// Takes the older half of another thread's tasks: runs one, keeps the rest.
++bool Walker::steal(unsigned self, Task& task, Scratch& scratch) {
++    for (size_t i = 1; i < queues.size(); i++) {
++        Queue& victim = queues[(self + i) % queues.size()];
++
++        {
++            std::lock_guard<std::mutex> lock(victim.mutex);
++            if (victim.tasks.empty())
++                continue;
++
++            const size_t taken = (victim.tasks.size() + 1) / 2;
++            scratch.stolen.assign(victim.tasks.begin(), victim.tasks.begin() + taken);
++            victim.tasks.erase(victim.tasks.begin(), victim.tasks.begin() + taken);
++        }
++
++        task = scratch.stolen.front();
++
++        if (scratch.stolen.size() > 1) {
++            std::lock_guard<std::mutex> lock(queues[self].mutex);
++            queues[self].tasks.insert(queues[self].tasks.end(), scratch.stolen.rbegin(), scratch.stolen.rend() - 1);
++        }
++
++        return true;
++    }
++
++    return false;
++}
++
++void Walker::work(unsigned self) {
++    Scratch scratch;
++    scratch.entries.resize(ENTRIES_BUFFER);
++
++    unsigned idle = 0;
++
++    while (true) {
++        Task task;
++
++        if (pop(self, task) || steal(self, task, scratch)) {
++            idle = 0;
++
++            // Once stopped, tasks are only drained so every thread sees `pending` reach zero
++            if (!stop.load(std::memory_order_relaxed))
++                visit(task, self, scratch);
++
++            pending.fetch_sub(1);
++            continue;
++        }
++
++        if (pending.load() == 0)
++            return;
++
++        // Nothing to steal right now, but another thread is still listing a directory
++        if (++idle < 32)
++            std::this_thread::yield();
++        else
++            std::this_thread::sleep_for(std::chrono::microseconds(200));
++    }
++}
++
++void Walker::visit(const Task& task, unsigned self, Scratch& scratch) {
++    tree.path(task.dir, scratch.path);
++
++    const int fd = open(scratch.path.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
++    if (fd < 0)
++        return;
++
++    struct stat st;
++    if (fstat(fd, &st) != 0
++        || (st.st_dev != task.parent_dev && isSkippedFs(fd))
++        || !firstVisit(st.st_dev, st.st_ino)) {
++        close(fd);
++        return;
++    }
++
++    uint64_t file_bytes = 0;
++    uint32_t dir_count = 0;
++    scratch.names.clear();
++
++    // A huge directory takes many rounds, so the stop flag is checked on each of them
++    while (!stop.load(std::memory_order_relaxed)) {
++        const long length = syscall(SYS_getdents64, fd, scratch.entries.data(), scratch.entries.size());
++
++        if (length < 0 && errno == EINTR)
++            continue;
++        if (length <= 0)
++            break;
++
++        for (long at = 0; at < length;) {
++            const auto* entry = reinterpret_cast<const KernelDirent*>(scratch.entries.data() + at);
++            const char* name = scratch.entries.data() + at + offsetof(KernelDirent, name);
++            at += entry->reclen;
++
++            if (name[0] == '.' && (name[1] == '\0' || (name[1] == '.' && name[2] == '\0')))
++                continue;
++
++            unsigned char type = entry->type;
++
++            // Only regular files need a stat (for their size)
++            if (type == TYPE_FILE || type == TYPE_UNKNOWN) {
++                struct stat file;
++                if (fstatat(fd, name, &file, AT_SYMLINK_NOFOLLOW) != 0)
++                    continue;
++
++                if (S_ISREG(file.st_mode))
++                    file_bytes += static_cast<uint64_t>(file.st_size);
++
++                if (!S_ISDIR(file.st_mode))
++                    continue;
++
++                type = TYPE_DIR;
++            }
++
++            if (type == TYPE_DIR) {
++                scratch.names.insert(scratch.names.end(), name, name + std::strlen(name) + 1);
++                dir_count++;
++            }
++        }
++    }
++
++    close(fd);
++
++    // Publish the sub-directories and queue them, then count this directory's own files
++    if (const DirTree::Block* block = tree.attach(task.dir, scratch.names, dir_count)) {
++        pending.fetch_add(dir_count);
++
++        std::lock_guard<std::mutex> lock(queues[self].mutex);
++        for (uint32_t i = dir_count; i-- > 0;)
++            queues[self].tasks.push_back(Task{block->first + i, st.st_dev});
++    }
++
++    tree.add(task.dir, file_bytes);
++}

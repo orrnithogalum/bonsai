@@ -45,6 +45,7 @@ public:
 
     int CHART_MAX_GENERATIONS = 4;
     int SIDEBAR_WIDTH = 40;
+    int SCANNER_THREADS = 0;
 
     double SIDEBAR_GROWTH_THRESHOLD_PERCENTAGE = 0.2;
     double CHART_MAX_SIZE_THRESHOLD_PERCENTAGE = 2;
@@ -293,6 +294,7 @@ private:
             {"CHART_MAX_GENERATIONS",               makeSetter(&Config::CHART_MAX_GENERATIONS),               true},
             {"CHART_DIM_FACTOR",                    makeSetter(&Config::CHART_DIM_FACTOR),                    true},
             {"ENABLE_FOLDER_SIZE_PERCENTAGES",      makeSetter(&Config::ENABLE_FOLDER_SIZE_PERCENTAGES),      true},
+            {"SCANNER_THREADS",                     makeSetter(&Config::SCANNER_THREADS),                     true},
         };
         return table;
     }

@@ -1,40 +1,11 @@
 #include "../../include/core/scanner.hpp"
 
 #include "../../include/config/config.hpp"
+#include "../../include/core/walker.hpp"
 
+#include <algorithm>
 #include <filesystem>
-#include <linux/magic.h>
-#include <sys/statfs.h>
-#include <sys/stat.h>
 #include <fstream>
-
-bool Scanner::isVirtualFs(const fs::path& path) {
-    std::string strPath = path.string();
-
-    if(
-        strPath.find("/proc") == 0 ||
-        strPath.find("/sys")  == 0
-        // strPath.find("/dev")  == 0
-        // strPath.find("/run")  == 0
-        // strPath.find("/tmp")  == 0
-    ) { return true; }
-
-    // Virtual filesystems
-    struct statfs stfs;
-    if (statfs(path.c_str(), &stfs) != 0)
-        return true;
-
-    // Ignore network shares
-    switch (stfs.f_type) {
-        case NFS_SUPER_MAGIC:
-        case SMB_SUPER_MAGIC:
-            return true;
-        default:
-            break;
-    }
-
-    return false;
-}
 
 void Scanner::loadSnapshot() {
     std::ifstream in(this->db_path);
@@ -53,64 +24,22 @@ void Scanner::loadSnapshot() {
         std::string sizeStr = line.substr(tabPos + 1);
         try {
             uint64_t size = std::stoull(sizeStr);
-            dir_sizes[path].second = size;
+
+            // Directories that no longer exist are dropped
+            uint32_t id = tree.find(path);
+            if (id != DirTree::NONE)
+                tree.node(id).snapped.store(size, std::memory_order_relaxed);
         } catch (const std::exception&) {
             continue;
         }
     }
 }
 
-uint64_t Scanner::computeDirSizes(const fs::path& dir) {
-    {
-        std::lock_guard<std::mutex> lock(stop_mutex);
-        if(this->done) { return 0; }
-    }
-
-    uint64_t total_size = 0;
-
-    // Some of these entry types can cause loops in scanning and have no real value
-    if (!fs::exists(dir) || !fs::is_directory(dir) || isVirtualFs(dir))
-        return 0;
-
-    struct stat st;
-    if (lstat(dir.c_str(), &st) != 0)
-        return 0;
-
-    // Make sure wh haven't visited anything
-    Inode inode{st.st_dev, st.st_ino};
-    if (visited.find(inode) != visited.end())
-        return 0;
-
-    visited.insert(inode);
-
-    for (auto& entry : fs::directory_iterator(dir, fs::directory_options::skip_permission_denied)) {
-        try {
-            if (fs::is_symlink(entry.path()))
-                continue;
-
-            if (fs::is_regular_file(entry.path())) {
-                total_size += fs::file_size(entry);
-            }
-            else if (fs::is_directory(entry.path())) {
-                total_size += computeDirSizes(entry.path());
-            }
-
-            {
-                std::unique_lock lock(map_mutex);
-                dir_sizes[dir.string()].first = total_size;
-                dir_sizes[dir.string()].second = 0;
-            }
-        } catch (const fs::filesystem_error&) {}
-    }
-
-    return total_size;
-}
-
 void Scanner::snapshot() {
     auto config = Config::get();
     if(!config.ENABLE_FOLDER_SIZE_PERCENTAGES) return;
 
-    std::lock_guard<std::mutex> lock(map_mutex);
+    std::lock_guard<std::mutex> lock(snapshot_mutex);
 
     std::error_code ec;
     if (this->db_path.has_parent_path()) {
@@ -120,17 +49,21 @@ void Scanner::snapshot() {
     std::ofstream out(this->db_path, std::ios::trunc);
     if (!out.is_open()) return;
 
-    for (const auto& [path, size] : dir_sizes) {
-        out << path << '\t' << size.first << '\n';
-    }
+    tree.forEach([&out](const std::string& path, const DirTree::Node& dir) {
+        uint64_t size = dir.size.load(std::memory_order_relaxed);
+
+        // An empty directory reads back as 0 anyway
+        if (size != 0) {
+            out << path << '\t' << size << '\n';
+        }
+    });
 }
 
 uint64_t Scanner::get(const fs::path& path) {
-    std::lock_guard<std::mutex> lock(map_mutex);
-    auto it = dir_sizes.find(path.string());
+    uint32_t id = tree.find(path.native());
 
-    if (it != dir_sizes.end())
-        return it->second.first;
+    if (id != DirTree::NONE)
+        return tree.node(id).size.load(std::memory_order_relaxed);
 
     return 0;
 }
@@ -139,32 +72,27 @@ uint64_t Scanner::getSnapped(const fs::path& path) {
     auto config = Config::get();
     if(!config.ENABLE_FOLDER_SIZE_PERCENTAGES) return 0;
 
-    std::lock_guard<std::mutex> lock(map_mutex);
-    auto it = dir_sizes.find(path.string());
+    uint32_t id = tree.find(path.native());
 
-    if (it != dir_sizes.end())
-        return it->second.second;
+    if (id != DirTree::NONE)
+        return tree.node(id).snapped.load(std::memory_order_relaxed);
 
     return 0;
 }
 
 Scanner::ScannerRemoveResult Scanner::remove(const fs::path& path) {
-    {
-        std::lock_guard<std::mutex> lock(stop_mutex);
-
-        if (!this->done) {
-            return ScannerRemoveResult{"Scanner hasn't completed yet.", true};
-        }
+    if (!this->done) {
+        return ScannerRemoveResult{"Scanner hasn't completed yet.", true};
     }
 
-    std::string target = path.string();
-
     uint64_t removed_size = 0;
+    uint32_t removed_dir = DirTree::NONE;
 
     if(fs::is_directory(path)) {
-        {
-            std::lock_guard<std::mutex> lock(map_mutex);
-            removed_size = dir_sizes[path.string()].first;
+        removed_dir = tree.find(path.native());
+
+        if (removed_dir != DirTree::NONE) {
+            removed_size = tree.node(removed_dir).size.load();
         }
     } else {
         std::error_code ec;
@@ -185,25 +113,15 @@ Scanner::ScannerRemoveResult Scanner::remove(const fs::path& path) {
         return ScannerRemoveResult{ec.message(), true};;
     }
 
-    {
-        std::lock_guard<std::mutex> lock(map_mutex);
-        fs::path current = path.parent_path();
+    // Every directory above the removed entry just got smaller
+    uint32_t parent = tree.find(path.parent_path().native());
 
-        while (!current.empty()) {
-            dir_sizes[current.string()].first -= removed_size;
+    if (parent != DirTree::NONE) {
+        tree.subtract(parent, removed_size);
+    }
 
-            if (dir_sizes[current.string()].first < 0) {
-                dir_sizes[current.string()].first = 0;
-            }
-
-            if (fs::equivalent(this->path, current)) {
-                break;
-            }
-
-            current = current.parent_path();
-        }
-
-        dir_sizes.erase(target);
+    if (removed_dir != DirTree::NONE) {
+        tree.node(removed_dir).removed = true;
     }
 
     this->snapshot();
@@ -211,25 +129,17 @@ Scanner::ScannerRemoveResult Scanner::remove(const fs::path& path) {
 }
 
 void Scanner::scan() {
-    computeDirSizes(this->path);
-    loadSnapshot();
+    Walker walker(tree, done, std::max(0, Config::get().SCANNER_THREADS));
+    walker.run();
 
-    {
-        std::lock_guard lock(stop_mutex);
-        this->done = true;
-    }
+    loadSnapshot();
+    this->done = true;
 }
 
 void Scanner::stop() {
-    {
-        std::lock_guard lock(stop_mutex);
-        this->done = true;
-    }
+    this->done = true;
 }
 
 bool Scanner::isDone() {
-    {
-        std::lock_guard lock(stop_mutex);
-        return this->done;
-    }
+    return this->done;
 }
