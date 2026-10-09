@@ -11,7 +11,7 @@
 #include <map>
 #include <set>
 
-void BonsaiPie::drawAngledBlockEllipseRingOffset(Canvas& c, int cx, int cy, int r1, int r2, int r_inner, double start_deg, double sweep_deg, const std::string& label, const Color& color, const Color& text_color) {
+void BonsaiPie::drawAngledBlockEllipseRingOffset(Canvas& c, int cx, int cy, int r1, int r2, int r_inner, double start_deg, double sweep_deg, const std::string& label, const Color& color, const Color& text_color, std::vector<int>& drawn_by, int slice_id) {
     if (sweep_deg <= 0.0)
         return;
 
@@ -47,6 +47,14 @@ void BonsaiPie::drawAngledBlockEllipseRingOffset(Canvas& c, int cx, int cy, int 
     const int text_x = (static_cast<int>(cx + std::cos(mid_angle) * mid_radius) - static_cast<int>(display_label.size()) / 2);
     const int text_y = static_cast<int>(cy + std::sin(mid_angle) * mid_radius);
 
+    const int width = c.width();
+    const int height = c.height();
+
+    // Built once per slice instead of once per block
+    const Canvas::Stylizer block_style = [color](Cell &c) {
+        c.foreground_color = color;
+    };
+
     for (double a = start; a < end; a += step) {
         const double dx_outer = cos_a * r1;
         const double dy_outer = sin_a * r2;
@@ -62,9 +70,21 @@ void BonsaiPie::drawAngledBlockEllipseRingOffset(Canvas& c, int cx, int cy, int 
             int px = static_cast<int>(cx + dx_outer * t);
             int py = static_cast<int>(cy + dy_outer * t);
 
-            c.DrawBlock(px, py, true, [color](Cell &c) {
-                c.foreground_color = color;
-            });
+            // Outside of the canvas, nothing would be drawn
+            if (px < 0 || px >= width || py < 0 || py >= height)
+                continue;
+
+            /* Performance:
+            - The angle steps are much finer than the blocks, so most steps land on a block this slice already drew
+            - Drawing a block twice with the same color changes nothing, and DrawBlock is the expensive part
+            - So each block is only drawn the first time this slice reaches it
+            */
+            int& owner = drawn_by[static_cast<size_t>(py / 2) * width + px];
+            if (owner == slice_id)
+                continue;
+
+            owner = slice_id;
+            c.DrawBlock(px, py, true, block_style);
         }
 
         double new_cos = cos_a * cos_d - sin_a * sin_d;
@@ -80,34 +100,66 @@ void BonsaiPie::drawAngledBlockEllipseRingOffset(Canvas& c, int cx, int cy, int 
     });
 }
 
-void BonsaiPie::collectEntries(const fs::path& dir, std::vector<EntryInfo>& entries, int current_depth, int max_depth, Scanner* scanner) {
+// An entry gets its own slice when it weighs at least `threshold` percent of the displayed directory
+static bool reachesThreshold(uint64_t size, uint64_t root_size, double threshold) {
+    return root_size > 0 && size <= root_size && size * 100.0 / root_size >= threshold;
+}
+
+void BonsaiPie::collectEntries(const fs::path& dir, std::vector<EntryInfo>& entries, int current_depth, int max_depth, uint64_t root_size, double threshold, Scanner* scanner) {
     if (current_depth > max_depth) return;
 
-    try {
-        for (const auto& entry : fs::directory_iterator(dir, fs::directory_options::skip_permission_denied)) {
-            if (fs::is_symlink(entry.path()))
+    std::error_code dir_ec;
+    fs::directory_iterator it(dir, fs::directory_options::skip_permission_denied, dir_ec);
+
+    for (; !dir_ec && it != fs::directory_iterator(); it.increment(dir_ec)) {
+        const fs::directory_entry& entry = *it;
+        std::error_code ec;
+
+        // The entry type comes with the directory listing: no extra system call per entry
+        if (entry.is_symlink(ec))
+            continue;
+
+        const bool is_dir = entry.is_directory(ec);
+        uint64_t size = 0;
+
+        if (is_dir) {
+            size = scanner->get(entry.path());
+
+        } else if (entry.is_regular_file(ec)) {
+            size = entry.file_size(ec);
+
+            // The file disappeared in the meantime
+            if (ec)
                 continue;
 
-            EntryInfo info;
-            info.path = entry.path();
-            info.is_dir = entry.is_directory();
-            info.depth = current_depth;
-
-            if (info.is_dir) {
-                info.size = scanner->get(entry.path());
-                entries.push_back(info);
-                collectEntries(entry.path(), entries, current_depth + 1, max_depth, scanner);
-
-            } else if (entry.is_regular_file()) {
-                info.size = entry.file_size();
-                entries.push_back(info);
-            }
+        } else {
+            continue;
         }
-    } catch (const fs::filesystem_error&) {}
+
+        /* Performance:
+        - Below the top level, an entry under the size threshold is never drawn
+        - Neither is anything inside of it, as a child can't be larger than its parent
+        - So these entries are dropped right here and their sub-directories are never opened,
+          which is most of the tree: at most 100 / threshold entries per ring can reach the threshold
+        - Top-level entries are all kept: the selection and CHART_MIN_SLICES need them
+        */
+        const bool has_slice = reachesThreshold(size, root_size, threshold);
+
+        if (current_depth > 0 && !has_slice)
+            continue;
+
+        entries.push_back(EntryInfo{entry.path(), size, is_dir, current_depth});
+
+        if (is_dir && has_slice)
+            collectEntries(entry.path(), entries, current_depth + 1, max_depth, root_size, threshold, scanner);
+    }
 }
 
 void BonsaiPie::worker(ScreenInteractive* screen, std::shared_ptr<AppData::BonsaiData> data, Scanner* scanner, const fs::path& default_path) {
     std::vector<EntryInfo> entries;
+
+    // True when `entries` was listed during the scan, with sizes that were still growing
+    bool entries_from_scan = false;
 
     int passes = 0;
 
@@ -133,21 +185,29 @@ void BonsaiPie::worker(ScreenInteractive* screen, std::shared_ptr<AppData::Bonsa
             }
         }
 
+        // Read before any size: if the scan is done at this point, every size read below is final
+        bool scan_done = scanner->isDone();
+
         // Get size of current dir
         uint64_t root_size = scanner->get(current_path);
         Config cfg = Config::get();
 
-        // Only recompute children if path has changed
-        if(!sel_changed){
+        /* Only recompute children if path has changed
+        - Or if they were listed during the scan: entries are filtered by size while listing,
+          so a list made with unfinished sizes can't be kept
+        */
+        if(!sel_changed || entries_from_scan){
+            entries_from_scan = !scan_done;
             entries.clear();
 
             // Parse current path with a max depth of 3
-            collectEntries(current_path, entries, 0, cfg.CHART_MAX_GENERATIONS - 1, scanner);
+            collectEntries(current_path, entries, 0, cfg.CHART_MAX_GENERATIONS - 1, root_size, cfg.CHART_MAX_SIZE_THRESHOLD_PERCENTAGE, scanner);
 
             /* Sort:
             - Depth first: lower depth is higer priority
             - Type second: directories have a higher priority over files
             - Size third: larger sizes have a higher priority over lower ones
+            - Name last: equally sized entries are in the same order as in the menu
 
             - Maybe we could use a priority queue here? idk.
             */
@@ -156,7 +216,9 @@ void BonsaiPie::worker(ScreenInteractive* screen, std::shared_ptr<AppData::Bonsa
                     return a.depth < b.depth;
                 if (a.is_dir != b.is_dir)
                     return a.is_dir > b.is_dir;
-                return a.size > b.size;
+                if (a.size != b.size)
+                    return a.size > b.size;
+                return a.path.native() < b.path.native();
             });
         }
 
@@ -288,8 +350,11 @@ void BonsaiPie::worker(ScreenInteractive* screen, std::shared_ptr<AppData::Bonsa
             - selected can be -1 because we manually add a back entry for non default_dir paths
             */
             if(selected != -1 && entry.depth == 0 && selected < entries.size() && entries[selected].depth == 0) {
-                color = fs::equivalent(entry.path, entries[selected].path) ? Color::White : color;
-                text_color = fs::equivalent(entry.path, entries[selected].path) ? Color::Black : text_color;
+                // Same element of the list: no need to ask the filesystem if the two paths are the same file
+                bool is_selected = &entry == &entries[selected];
+
+                color = is_selected ? Color::White : color;
+                text_color = is_selected ? Color::Black : text_color;
             }
 
             slice_colors[entry.path.string()].first = color;
@@ -393,6 +458,10 @@ Component BonsaiPie::pie(std::shared_ptr<AppData::BonsaiData> data, Scanner* sca
                 current_path = *data->path;
             }
 
+            // One marker per block of the canvas: the last slice that drew it (see drawAngledBlockEllipseRingOffset)
+            std::vector<int> drawn_by(static_cast<size_t>(std::max(w, 0)) * (std::max(h, 0) / 2 + 1), -1);
+            int slice_id = 0;
+
             for (auto& entry : entries) {
 
                 int inner_radius = inner_hole_radius + entry.depth * layer_thickness;
@@ -409,7 +478,9 @@ Component BonsaiPie::pie(std::shared_ptr<AppData::BonsaiData> data, Scanner* sca
                     entry.sweep,
                     entry.label,
                     entry.color,
-                    entry.text_color
+                    entry.text_color,
+                    drawn_by,
+                    slice_id++
                 );
             }
 
