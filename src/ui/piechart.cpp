@@ -161,6 +161,9 @@ void BonsaiPie::worker(ScreenInteractive* screen, std::shared_ptr<AppData::Bonsa
     // True when `entries` was listed during the scan, with sizes that were still growing
     bool entries_from_scan = false;
 
+    // Directory `entries` was listed for
+    fs::path entries_path;
+
     int passes = 0;
 
     while (true) {
@@ -195,9 +198,13 @@ void BonsaiPie::worker(ScreenInteractive* screen, std::shared_ptr<AppData::Bonsa
         /* Only recompute children if path has changed
         - Or if they were listed during the scan: entries are filtered by size while listing,
           so a list made with unfinished sizes can't be kept
+        - The path is compared too: when a selection change and a new path arrive together
+          (arrow key then enter, handled in the same frame), sel_changed is set although the path changed.
+          The pie then showed the entries of the previous directory until the next key press
         */
-        if(!sel_changed || entries_from_scan){
+        if(!sel_changed || entries_from_scan || current_path != entries_path){
             entries_from_scan = !scan_done;
+            entries_path = current_path;
             entries.clear();
 
             // Parse current path with a max depth of 3
