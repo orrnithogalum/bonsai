@@ -9,6 +9,7 @@
 #include <string>
 #include <cmath>
 #include <map>
+#include <set>
 
 void BonsaiPie::drawAngledBlockEllipseRingOffset(Canvas& c, int cx, int cy, int r1, int r2, int r_inner, double start_deg, double sweep_deg, const std::string& label, const Color& color, const Color& text_color) {
     if (sweep_deg <= 0.0)
@@ -184,11 +185,52 @@ void BonsaiPie::worker(ScreenInteractive* screen, std::shared_ptr<AppData::Bonsa
           Used to progressively adjust (e.g., darken) sibling slice colors within
           the same depth.
         */
-        std::map<std::string, int> layer_offsets_per_parent;
-        std::map<std::string, int> slice_offsets;
+        std::map<std::string, double> layer_offsets_per_parent;
+        std::map<std::string, double> slice_offsets;
 
         std::map<std::pair<int, std::string>, int> color_indexes_per_parent;
         std::map<std::string, std::pair<Color, Color>> slice_colors;
+
+        /* Minimum slices:
+        - If no top-level entry reaches the size threshold (e.g. lots of equally sized entries),
+          every slice gets filtered out and the pie stays empty
+        - In that case the CHART_MIN_SLICES largest top-level entries are drawn anyway, at their real size
+        - Nothing is forced as soon as one top-level entry reaches the threshold
+        */
+        std::set<const EntryInfo*> forced_slices;
+
+        if(root_size > 0 && cfg.CHART_MIN_SLICES > 0) {
+            std::vector<const EntryInfo*> candidates;
+            bool has_visible_slice = false;
+
+            for(const auto& entry : entries) {
+                // Entries are sorted by depth, so top-level ones come first
+                if(entry.depth != 0) {
+                    break;
+                }
+
+                if(entry.size == 0 || entry.size > root_size) {
+                    continue;
+                }
+
+                if(entry.size * 100.0 / root_size >= cfg.CHART_MAX_SIZE_THRESHOLD_PERCENTAGE) {
+                    has_visible_slice = true;
+                    break;
+                }
+
+                candidates.push_back(&entry);
+            }
+
+            if(!has_visible_slice) {
+                // Stable: equally sized entries keep their current order
+                std::stable_sort(candidates.begin(), candidates.end(), [](const EntryInfo* a, const EntryInfo* b) {
+                    return a->size > b->size;
+                });
+
+                size_t count = std::min(candidates.size(), static_cast<size_t>(cfg.CHART_MIN_SLICES));
+                forced_slices.insert(candidates.begin(), candidates.begin() + count);
+            }
+        }
 
         for(auto& entry : entries) {
             if(root_size <= 0) {
@@ -217,10 +259,11 @@ void BonsaiPie::worker(ScreenInteractive* screen, std::shared_ptr<AppData::Bonsa
             int inner_radius = inner_hole_radius + ((entry.depth + 1) * 25);
             int outer_radius = inner_radius + 25;
 
-            int occupancy = entry.size * 100 / root_size;
-            int sweep = occupancy * 360 / 100;
+            // Kept as doubles: integer math dropped several degrees per slice, which left gaps in the rings
+            double occupancy = entry.size * 100.0 / root_size;
+            double sweep = entry.size * 360.0 / root_size;
 
-            if(occupancy < cfg.CHART_MAX_SIZE_THRESHOLD_PERCENTAGE) {
+            if(occupancy < cfg.CHART_MAX_SIZE_THRESHOLD_PERCENTAGE && !forced_slices.count(&entry)) {
                 continue;
             }
 
