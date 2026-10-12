@@ -170,16 +170,22 @@ void BonsaiPie::worker(ScreenInteractive* screen, std::shared_ptr<AppData::Bonsa
 
         fs::path current_path = "";
         bool sel_changed = false;
-        int selected = 0;
+        // Path of the entry selected in the menu ("" for ".." or nothing selected)
+        std::string selected_path;
 
         {
             std::lock_guard<std::mutex> lock(data->menu_mutex);
             sel_changed = data->pie_sel_changed;
             current_path = *data->path;
 
-            // If the top label is ".." it means we have to offset selected index by -1
+            /* The selection is matched by path, not by index:
+            - The menu lists every entry (symlinks included, sorted with their target's type and size)
+            - The pie skips symlinks and special files, so the two lists don't line up:
+              in /usr/lib, the "terminfo" symlink shifted every following index by one
+            - The ".." entry has an empty path, so it never matches a slice
+            */
             if (*data->selected >= 0 && *data->selected < (int)data->menu_entries->size()) {
-                selected = !fs::equivalent(default_path, current_path) ? *data->selected - 1 : *data->selected;
+                selected_path = (*data->menu_entries)[*data->selected].path;
             }
 
             // Don't forget to reset wake up condition
@@ -353,15 +359,10 @@ void BonsaiPie::worker(ScreenInteractive* screen, std::shared_ptr<AppData::Bonsa
                 text_color = slice_colors[parent].second;
             }
 
-            /* In these two code blocks, false is the logic to check wether the slice is selected
-            - selected can be -1 because we manually add a back entry for non default_dir paths
-            */
-            if(selected != -1 && entry.depth == 0 && selected < entries.size() && entries[selected].depth == 0) {
-                // Same element of the list: no need to ask the filesystem if the two paths are the same file
-                bool is_selected = &entry == &entries[selected];
-
-                color = is_selected ? Color::White : color;
-                text_color = is_selected ? Color::Black : text_color;
+            // Only top-level slices can be selected; both paths come from directory_iterator(current_path)
+            if(entry.depth == 0 && !selected_path.empty() && entry.path.native() == selected_path) {
+                color = Color::White;
+                text_color = Color::Black;
             }
 
             slice_colors[entry.path.string()].first = color;
