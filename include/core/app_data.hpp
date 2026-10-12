@@ -19,7 +19,8 @@ public:
       size   → folder size (0 for directories)
       label  → display name in the menu
       path   → absolute filesystem path
-      is_dir → whether entry is a directory
+      is_dir → whether entry is a directory (follows symlinks)
+      is_symlink → whether entry itself is a symbolic link
     */
     struct BonsaiMenuEntry {
         std::uintmax_t size;
@@ -28,6 +29,7 @@ public:
         std::string path;
 
         bool is_dir;
+        bool is_symlink = false;
     };
 
     struct BonsaiPieEntry {

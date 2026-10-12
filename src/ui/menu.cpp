@@ -39,6 +39,9 @@ void BonsaiMenu::worker(ScreenInteractive* screen, std::shared_ptr<AppData::Bons
                 item.label = entry.path().filename().string();
                 item.is_dir = entry.is_directory();
 
+                std::error_code link_ec;
+                item.is_symlink = entry.is_symlink(link_ec);
+
                 if (!item.is_dir) {
                     std::error_code ec;
                     item.size = entry.file_size(ec);
@@ -140,6 +143,8 @@ Component BonsaiMenu::menu(ScreenInteractive* screen, std::shared_ptr<AppData::B
         std::string icon_str;
         if (item.label == "..") {
             icon_str = config.SIDEBAR_BACK_ICON;
+        } else if (item.is_symlink) {
+            icon_str = is_selected ? config.SIDEBAR_SELECTED_SYMLINK_ICON : config.SIDEBAR_SYMLINK_ICON;
         } else {
             icon_str = is_selected ? (item.is_dir ? config.SIDEBAR_SELECTED_FOLDER_ICON : config.SIDEBAR_SELECTED_FILE_ICON)
                                    : (item.is_dir ? config.SIDEBAR_FOLDER_ICON          : config.SIDEBAR_FILE_ICON);

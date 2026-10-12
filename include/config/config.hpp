@@ -40,6 +40,10 @@ public:
     std::string SIDEBAR_FILE_ICON;
     std::string SIDEBAR_BACK_ICON;
 
+    // Defaulted here too: config files written before these keys existed don't have them
+    std::string SIDEBAR_SELECTED_SYMLINK_ICON = "";
+    std::string SIDEBAR_SYMLINK_ICON = "";
+
     std::array<int, 3> SIDEBAR_GROWTH_COLOR = {255, 175, 95};
     std::array<int, 3> SIDEBAR_SHRINK_COLOR = {95, 125, 255};
 
@@ -288,6 +292,8 @@ private:
             {"SIDEBAR_FOLDER_ICON",                 makeSetter(&Config::SIDEBAR_FOLDER_ICON),                 true},
             {"SIDEBAR_FILE_ICON",                   makeSetter(&Config::SIDEBAR_FILE_ICON),                   true},
             {"SIDEBAR_BACK_ICON",                   makeSetter(&Config::SIDEBAR_BACK_ICON),                   true},
+            {"SIDEBAR_SELECTED_SYMLINK_ICON",       makeSetter(&Config::SIDEBAR_SELECTED_SYMLINK_ICON),       true},
+            {"SIDEBAR_SYMLINK_ICON",                makeSetter(&Config::SIDEBAR_SYMLINK_ICON),                true},
             {"SIDEBAR_GROWTH_COLOR",                makeSetter(&Config::SIDEBAR_GROWTH_COLOR),                true},
             {"SIDEBAR_SHRINK_COLOR",                makeSetter(&Config::SIDEBAR_SHRINK_COLOR),                true},
             {"CHART_MAX_SIZE_THRESHOLD_PERCENTAGE", makeSetter(&Config::CHART_MAX_SIZE_THRESHOLD_PERCENTAGE), true},
